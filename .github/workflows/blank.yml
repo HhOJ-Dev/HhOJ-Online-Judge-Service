@@ -1,0 +1,205 @@
+name: HhOJ-Online-Judge-Service
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Code
+        uses: actions/checkout@v4
+
+      - name: Install Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ time
+
+      - name: Compile User Code
+        id: compile
+        run: |
+          g++ -o solution Answer.cpp 2> compile_error.log
+          if [ $? -ne 0 ]; then
+            echo "status=CE" >> $GITHUB_OUTPUT
+            echo "CE" > status.txt
+            exit 0
+          fi
+          echo "status=OK" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Run Tests
+        id: run_tests
+        if: steps.compile.outputs.status == 'OK' || steps.compile.outputs.status == ''
+        run: |
+          # Find all testcase files
+          testcases=$(ls testcase*.in 2>/dev/null | sort -V)
+          if [ -z "$testcases" ]; then
+            echo "No testcases found!"
+            echo "status=UKE" >> $GITHUB_OUTPUT
+            echo "UKE" > status.txt
+            exit 0
+          fi
+
+          total=0
+          passed=0
+          final_status="AC"
+          error_msg=""
+
+          for infile in $testcases; do
+            num=$(echo "$infile" | grep -o '[0-9]*')
+            outfile="ans${num}.out"
+            expected="testcase${num}.out"
+
+            total=$((total + 1))
+
+            # Run with time limit (2 seconds) and memory limit (256MB)
+            # Using ulimit for memory and timeout for time
+            (
+              ulimit -v 262144  # 256MB virtual memory
+              timeout 2s ./solution < "$infile" > "$outfile" 2> run_error.log
+            )
+            exit_code=$?
+
+            if [ $exit_code -eq 124 ]; then
+              final_status="TLE"
+              error_msg="Time Limit Exceeded on testcase ${num}"
+              echo "TLE" > status.txt
+              break
+            elif [ $exit_code -eq 139 ]; then
+              final_status="RE"
+              error_msg="Runtime Error (Segmentation Fault) on testcase ${num}"
+              echo "RE" > status.txt
+              break
+            elif [ $exit_code -ne 0 ]; then
+              final_status="RE"
+              error_msg="Runtime Error (exit code ${exit_code}) on testcase ${num}"
+              echo "RE" > status.txt
+              break
+            fi
+
+            # Check memory usage
+            mem_usage=$(/usr/bin/time -f "%M" ./solution < "$infile" 2>&1 > /dev/null)
+            if [ -n "$mem_usage" ] && [ "$mem_usage" -gt 262144 ]; then
+              final_status="MLE"
+              error_msg="Memory Limit Exceeded on testcase ${num}"
+              echo "MLE" > status.txt
+              break
+            fi
+
+            # Compare output
+            if [ ! -f "$expected" ]; then
+              final_status="UKE"
+              error_msg="Missing expected output file: ${expected}"
+              echo "UKE" > status.txt
+              break
+            fi
+
+            if diff -w "$outfile" "$expected" > /dev/null 2>&1; then
+              passed=$((passed + 1))
+            else
+              final_status="WA"
+              error_msg="Wrong Answer on testcase ${num}"
+              echo "WA" > status.txt
+              break
+            fi
+          done
+
+          # If all testcases passed
+          if [ "$final_status" = "AC" ] && [ $total -gt 0 ]; then
+            echo "AC" > status.txt
+          elif [ $total -eq 0 ]; then
+            final_status="UKE"
+            error_msg="No testcases found"
+            echo "UKE" > status.txt
+          fi
+
+          echo "status=${final_status}" >> $GITHUB_OUTPUT
+          echo "total=${total}" >> $GITHUB_OUTPUT
+          echo "passed=${passed}" >> $GITHUB_OUTPUT
+          if [ -n "$error_msg" ]; then
+            echo "error_msg=${error_msg}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Summary Report
+        if: always()
+        run: |
+          echo "## 📊 HhOJ Judge Result" > summary.md
+          echo "" >> summary.md
+
+          status=$(cat status.txt 2>/dev/null || echo "UKE")
+
+          case "$status" in
+            "AC")
+              echo "**Verdict**:  **Accepted (AC)**" >> summary.md
+              echo "" >> summary.md
+              echo "All test cases passed successfully!" >> summary.md
+              ;;
+            "CE")
+              echo "**Verdict**:  **Compilation Error (CE)**" >> summary.md
+              echo "" >> summary.md
+              echo "**Compilation Error Log:**" >> summary.md
+              echo '```' >> summary.md
+              cat compile_error.log 2>/dev/null | head -50 >> summary.md
+              echo '```' >> summary.md
+              ;;
+            "WA")
+              echo "**Verdict**:  **Wrong Answer (WA)**" >> summary.md
+              ;;
+            "TLE")
+              echo "**Verdict**:  **Time Limit Exceeded (TLE)**" >> summary.md
+              ;;
+            "MLE")
+              echo "**Verdict**:  **Memory Limit Exceeded (MLE)**" >> summary.md
+              ;;
+            "RE")
+              echo "**Verdict**:  **Runtime Error (RE)**" >> summary.md
+              ;;
+            "UKE")
+              echo "**Verdict**:  **Unknown Error (UKE)**" >> summary.md
+              ;;
+          esac
+
+          if [ -n "${{ steps.run_tests.outputs.error_msg }}" ] && [ "$status" != "AC" ] && [ "$status" != "CE" ]; then
+            echo "" >> summary.md
+            echo "**Details**: ${{ steps.run_tests.outputs.error_msg }}" >> summary.md
+          fi
+
+          if [ "$status" = "AC" ] || [ "$status" = "WA" ]; then
+            echo "" >> summary.md
+            echo "**Test Results**: ${{ steps.run_tests.outputs.passed }} / ${{ steps.run_tests.outputs.total }} passed" >> summary.md
+          fi
+
+          # Show diff for WA
+          if [ "$status" = "WA" ]; then
+            echo "" >> summary.md
+            echo "**First difference detected:**" >> summary.md
+            echo '```diff' >> summary.md
+            for infile in testcase*.in; do
+              num=$(echo "$infile" | grep -o '[0-9]*')
+              if [ -f "ans${num}.out" ] && [ -f "testcase${num}.out" ]; then
+                if ! diff -w "ans${num}.out" "testcase${num}.out" > /dev/null 2>&1; then
+                  echo "--- testcase${num}.out (expected) vs ans${num}.out (your output) ---" >> summary.md
+                  diff -u "testcase${num}.out" "ans${num}.out" | head -20 >> summary.md
+                  break
+                fi
+              fi
+            done
+            echo '```' >> summary.md
+          fi
+
+          cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-results
+          path: |
+            status.txt
+            compile_error.log
+            ans*.out
+            result*.out
+          if-no-files-found: ignore
