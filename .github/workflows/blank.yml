@@ -10,6 +10,12 @@ jobs:
       HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+      - name: Debug
+        run: |
+          echo "URL=[$HHOJ_API_URL]"
+          echo "KEY_LEN=${#HHOJ_API_KEY}"
+          nslookup hhoj.zhangszhe.workers.dev
+          curl -sI "https://hhoj.zhangszhe.workers.dev"
       - name: Setup
         run: sudo apt-get update && sudo apt-get install -y gcc g++ mono-complete default-jdk python3 fpc
       - name: Judge
