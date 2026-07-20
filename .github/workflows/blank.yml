@@ -1,17 +1,54 @@
-name: HhOJ Judge
+name: HhOJ Online Judge
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   judge:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      HHOJ_API_URL: ${{ secrets.HHOJ_API_URL }}
-      HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
+
     steps:
-      - name: Setup
-        run: sudo apt-get update && sudo apt-get install -y gcc g++ g++-14 mono-complete default-jdk python3 fpc
-      - name: Judge
-        run: echo "${{ secrets.JUDGE_SCRIPT_B64 }}" | base64 -d > /tmp/judge.py && python3 /tmp/judge.py
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ time
+
+      - name: Run Judge
+        id: judge
+        run: |
+          python3 src/judge.py --language c++11 --source Answer.cpp --time-limit 2 --memory-limit 262144
+
+      - name: Generate Summary Report
+        if: always()
+        run: |
+          if [ -f summary.md ]; then
+            cat summary.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## HhOJ Judge Result" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Verdict**: Unknown Error (UKE)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-results
+          path: |
+            status.txt
+            judge_result.json
+            compile_error.log
+            run_error.log
+            summary.md
+            ans*.out
+          if-no-files-found: ignore
