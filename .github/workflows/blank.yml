@@ -21,12 +21,23 @@ jobs:
       - name: Install Compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ time
+          sudo apt-get install -y g++ time curl jq
 
-      - name: Run Judge
-        id: judge
+      - name: Fetch Submissions from API
+        id: fetch
         run: |
-          python3 src/judge.py --language c++11 --source Answer.cpp --time-limit 2 --memory-limit 262144
+          echo "Fetching pending submissions..."
+          curl -s -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
+            "${{ secrets.HHOJ_HOST }}/api/judge_fetch.php?batch=1&inline_testcases=1" \
+            -o submissions.json
+          cat submissions.json
+
+      - name: Process Submissions
+        run: |
+          python3 src/judge.py \
+            --api-key "${{ secrets.HHOJ_API_KEY }}" \
+            --host "${{ secrets.HHOJ_HOST }}" \
+            --submissions submissions.json
 
       - name: Generate Summary Report
         if: always()
