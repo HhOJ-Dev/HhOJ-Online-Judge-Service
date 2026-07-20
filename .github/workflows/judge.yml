@@ -24,22 +24,104 @@ jobs:
           sudo apt-get install -y g++ gcc time curl jq
           pip install requests
  
+      - name: Validate Secrets
+        run: |
+          if [ -z "${{ secrets.HHOJ_API_KEY }}" ]; then
+            echo "::error::HHOJ_API_KEY secret is not configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.HHOJ_HOST }}" ]; then
+            echo "::error::HHOJ_HOST secret is not configured"
+            exit 1
+          fi
+          HOST="${{ secrets.HHOJ_HOST }}"
+          HOST="${HOST%/}"
+          echo "HHOJ_HOST = $HOST"
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "Secrets validation passed"
+ 
+      - name: Network Diagnostic
+        run: |
+          echo "=== DNS Resolution ==="
+          HOSTNAME=$(echo "$HOST" | sed -E 's/^https?:\/\///' | sed -E 's/\/.*$//')
+          echo "Hostname: $HOSTNAME"
+          nslookup "$HOSTNAME" 2>&1 || echo "nslookup failed"
+          
+          echo ""
+          echo "=== Ping Test ==="
+          ping -c 2 "$HOSTNAME" 2>&1 || echo "ping failed (may be blocked)"
+          
+          echo ""
+          echo "=== Curl HEAD Test ==="
+          curl -sI --max-time 10 "$HOST" 2>&1 | head -20 || echo "curl HEAD failed"
+ 
       - name: Fetch Submissions from API
         id: fetch
         run: |
           echo "Fetching pending submissions..."
-          curl -s -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
-            "${{ secrets.HHOJ_HOST }}/api/judge_fetch.php?batch=1&inline_testcases=1" \
-            -o submissions.json
-          echo "Submissions fetched:"
-          cat submissions.json | jq '.submissions | length' || echo "0"
+          
+          URL="${HOST}/api/judge_fetch.php?batch=1&inline_testcases=1"
+          echo "URL: $URL"
+          
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o submissions.json \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 2 \
+            -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
+            "$URL" 2>curl_error.log)
+          
+          CURL_EXIT=$?
+          echo "Curl exit code: $CURL_EXIT"
+          echo "HTTP Status: $HTTP_CODE"
+          
+          if [ $CURL_EXIT -ne 0 ]; then
+            echo "Curl error (exit code $CURL_EXIT):"
+            cat curl_error.log
+            echo ""
+            echo "Response body (if any):"
+            cat submissions.json 2>/dev/null || echo "(empty)"
+            echo "::error::curl failed with exit code $CURL_EXIT"
+            exit 1
+          fi
+          
+          echo "Response preview:"
+          head -c 1000 submissions.json
+          echo ""
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Failed to fetch submissions (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          
+          SUCCESS=$(cat submissions.json | jq -r '.success' 2>/dev/null || echo "false")
+          if [ "$SUCCESS" != "true" ]; then
+            MSG=$(cat submissions.json | jq -r '.message' 2>/dev/null || echo "Unknown error")
+            echo "::error::API error: $MSG"
+            exit 1
+          fi
+          
+          COUNT=$(cat submissions.json | jq '.submissions | length' 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Submissions fetched: $COUNT"
  
       - name: Process Submissions
+        if: steps.fetch.outputs.count > 0
         run: |
-          python3 src/judge.py \
+          cd blankend
+          python3 judge.py \
             --api-key "${{ secrets.HHOJ_API_KEY }}" \
-            --host "${{ secrets.HHOJ_HOST }}" \
-            --submissions submissions.json
+            --host "$HOST" \
+            --submissions ../submissions.json
+ 
+      - name: No Pending Submissions
+        if: steps.fetch.outputs.count == 0
+        run: |
+          echo "No pending submissions to judge"
+          echo '{"status":"skip","message":"No pending submissions"}' > judge_result.json
+          echo "SKIP" > status.txt
+          echo "## HhOJ Judge Result" > summary.md
+          echo "" >> summary.md
+          echo "**Status**: No pending submissions" >> summary.md
  
       - name: Generate Summary Report
         if: always()
@@ -60,6 +142,8 @@ jobs:
           path: |
             status.txt
             judge_result.json
+            submissions.json
+            curl_error.log
             compile_error.log
             run_error.log
             summary.md
