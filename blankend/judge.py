@@ -8,6 +8,7 @@ import argparse
 import tempfile
 import hashlib
 import time
+import re
 import requests
 
 from runners import get_runner
@@ -55,7 +56,59 @@ def compare_output(user_out_path, expected_out_path):
         return False
 
 
-def download_testcase(url, api_key, cache_dir):
+def solve_infinitree_challenge(html_text):
+    """Parse and solve InfinityFree's JavaScript AES challenge."""
+    from Crypto.Cipher import AES
+    numbers = re.findall(r'toNumbers\("([a-f0-9]{32})"\)', html_text)
+    if len(numbers) < 3:
+        return None
+
+    a = bytes.fromhex(numbers[0])  # key
+    b = bytes.fromhex(numbers[1])  # IV
+    c = bytes.fromhex(numbers[2])  # ciphertext
+
+    # Try ECB first (most common for InfinityFree)
+    try:
+        cipher = AES.new(a, AES.MODE_ECB)
+        decrypted = cipher.decrypt(c)
+        return decrypted.hex()
+    except Exception:
+        pass
+
+    # Try CBC as fallback
+    try:
+        cipher = AES.new(a, AES.MODE_CBC, b)
+        decrypted = cipher.decrypt(c)
+        return decrypted.hex()
+    except Exception:
+        pass
+
+    return None
+
+
+def create_api_session(host, api_key):
+    """Create a requests session with InfinityFree challenge handling."""
+    session = requests.Session()
+    session.headers.update({
+        'X-API-Key': api_key,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+    })
+
+    # Pre-fetch to solve InfinityFree JavaScript challenge
+    try:
+        response = session.get(host, timeout=30, allow_redirects=True)
+        if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
+            cookie_value = solve_infinitree_challenge(response.text)
+            if cookie_value:
+                domain = host.split('/')[2] if '://' in host else host.split('/')[0]
+                session.cookies.set('__test', cookie_value, domain=domain)
+    except Exception:
+        pass
+
+    return session
+
+
+def download_testcase(url, session, cache_dir):
     url_hash = hashlib.md5(url.encode()).hexdigest()
     cache_path = os.path.join(cache_dir, url_hash)
 
@@ -63,23 +116,28 @@ def download_testcase(url, api_key, cache_dir):
         return cache_path
 
     try:
-        headers = {}
-        if api_key:
-            headers['X-API-Key'] = api_key
-
-        response = requests.get(url, headers=headers, timeout=30)
+        response = session.get(url, timeout=30)
         if response.status_code == 200:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_path, 'wb') as f:
-                f.write(response.content)
-            return cache_path
+            # Handle InfinityFree challenge
+            if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
+                cookie_value = solve_infinitree_challenge(response.text)
+                if cookie_value:
+                    domain = url.split('/')[2] if '://' in url else ''
+                    session.cookies.set('__test', cookie_value, domain=domain)
+                    response = session.get(url, timeout=30)
+
+            if response.status_code == 200 and not response.text.startswith('<html'):
+                os.makedirs(cache_dir, exist_ok=True)
+                with open(cache_path, 'wb') as f:
+                    f.write(response.content)
+                return cache_path
     except Exception:
         pass
 
     return None
 
 
-def prepare_testcase(tc, sub_dir, api_key, cache_dir):
+def prepare_testcase(tc, sub_dir, session, cache_dir):
     in_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.in")
     out_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.out")
 
@@ -94,8 +152,8 @@ def prepare_testcase(tc, sub_dir, api_key, cache_dir):
             pass
 
     if tc.get('input_url') and tc.get('output_url'):
-        downloaded_in = download_testcase(tc['input_url'], api_key, cache_dir)
-        downloaded_out = download_testcase(tc['output_url'], api_key, cache_dir)
+        downloaded_in = download_testcase(tc['input_url'], session, cache_dir)
+        downloaded_out = download_testcase(tc['output_url'], session, cache_dir)
         if downloaded_in and downloaded_out:
             import shutil
             shutil.copy(downloaded_in, in_path)
@@ -105,7 +163,7 @@ def prepare_testcase(tc, sub_dir, api_key, cache_dir):
     return None, None
 
 
-def judge_submission(submission, work_dir, api_key):
+def judge_submission(submission, work_dir, session):
     sub_id = submission['id']
     language = submission['language']
     code = submission['code']
@@ -161,7 +219,7 @@ def judge_submission(submission, work_dir, api_key):
             })
             continue
 
-        in_path, out_path = prepare_testcase(tc, sub_dir, api_key, cache_dir)
+        in_path, out_path = prepare_testcase(tc, sub_dir, session, cache_dir)
         if not in_path or not out_path:
             tc_result = {
                 'id': tc.get('id'),
@@ -229,12 +287,8 @@ def judge_submission(submission, work_dir, api_key):
     return result
 
 
-def report_results(site_url, api_key, results):
+def report_results(session, site_url, results):
     url = f"{site_url}/api/judge_report.php"
-    headers = {
-        'Content-Type': 'application/json',
-        'X-API-Key': api_key
-    }
 
     hhoj_results = []
     for r in results:
@@ -250,7 +304,14 @@ def report_results(site_url, api_key, results):
     payload = {'results': hhoj_results}
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = session.post(url, json=payload, timeout=30)
+        # Handle InfinityFree challenge on POST too
+        if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
+            cookie_value = solve_infinitree_challenge(response.text)
+            if cookie_value:
+                domain = site_url.split('/')[2] if '://' in site_url else ''
+                session.cookies.set('__test', cookie_value, domain=domain)
+                response = session.post(url, json=payload, timeout=30)
         return response.status_code == 200, response.text
     except Exception as e:
         return False, str(e)
@@ -279,13 +340,16 @@ def main():
     submissions = data.get('submissions', [])
     print(f"Loaded {len(submissions)} submissions")
 
+    # Create session with InfinityFree challenge handling
+    session = create_api_session(site_url, args.api_key)
+
     results = []
     for submission in submissions:
         sub_id = submission['id']
         print(f"[{sub_id}] Judging {submission.get('language', 'unknown')}...")
 
         try:
-            result = judge_submission(submission, work_dir, args.api_key)
+            result = judge_submission(submission, work_dir, session)
             results.append(result)
             print(f"[{sub_id}] Result: {result['status']} (score: {result['score']}, time: {result['time_used']}ms)")
         except Exception as e:
@@ -301,7 +365,7 @@ def main():
 
     if results:
         print(f"Reporting {len(results)} results to {site_url}...")
-        ok, msg = report_results(site_url, args.api_key, results)
+        ok, msg = report_results(session, site_url, results)
         if ok:
             print("Report successful")
         else:

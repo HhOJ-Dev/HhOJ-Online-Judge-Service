@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
-          pip install requests
+          pip install requests pycryptodome
 
       - name: Validate Secrets
         run: |
@@ -62,40 +62,15 @@ jobs:
         run: |
           echo "Fetching pending submissions..."
 
-          URL="${HOST}/api/judge_fetch.php?batch=1&inline_testcases=1"
-          echo "URL: $URL"
+          python3 blankend/fetch_submissions.py \
+            --host "$HOST" \
+            --api-key "${{ secrets.HHOJ_API_KEY }}" \
+            --output submissions.json \
+            --batch 1 \
+            --inline-testcases 1
 
-          HTTP_CODE=$(curl -s -w "%{http_code}" -o submissions.json \
-            --max-time 30 \
-            --retry 5 \
-            --retry-delay 2 \
-            --retry-all-errors \
-            -L \
-            --http1.1 \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
-            -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
-            "$URL" 2>curl_error.log) || CURL_EXIT=$?
-
-          CURL_EXIT=${CURL_EXIT:-0}
-          echo "Curl exit code: $CURL_EXIT"
-          echo "HTTP Status: $HTTP_CODE"
-
-          if [ $CURL_EXIT -ne 0 ]; then
-            echo "Curl error (exit code $CURL_EXIT):"
-            cat curl_error.log
-            echo ""
-            echo "Response body (if any):"
-            cat submissions.json 2>/dev/null || echo "(empty)"
-            echo "::error::curl failed with exit code $CURL_EXIT"
-            exit 1
-          fi
-
-          echo "Response preview:"
-          head -c 1000 submissions.json
-          echo ""
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Failed to fetch submissions (HTTP $HTTP_CODE)"
+          if [ ! -f submissions.json ]; then
+            echo "::error::Failed to fetch submissions"
             exit 1
           fi
 
