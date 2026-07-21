@@ -1,0 +1,11 @@
+[
+  {
+    "submission_id": 1,
+    "status": "CE",
+    "score": 0,
+    "time_used": 0,
+    "memory_used": 0,
+    "error_message": "/home/runner/work/HhOJ-Online-Judge-Service/HhOJ-Online-Judge-Service/judge_work/sub_1/main.cpp:1:1: error: ‘pigeon4836’ does not name a type\n    1 | pigeon4836\n      | ^~~~~~~~~~\n",
+    "testcases": []
+  }
+]
