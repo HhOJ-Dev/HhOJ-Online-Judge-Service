@@ -54,13 +54,7 @@ router.post('/judge', async (req, res) => {
     store.save(judgeId, {
       status: 'pending',
       language,
-      code,
-      testcases,
-      testcasesCount: testcases.length,
-      config: {
-        timeLimit: judgeConfig?.timeLimit || config.judge.defaultTimeLimit,
-        memoryLimit: judgeConfig?.memoryLimit || config.judge.defaultMemoryLimit
-      }
+      testcasesCount: testcases.length
     });
 
     // Trigger GitHub Actions workflow

@@ -76,27 +76,6 @@ class StoreService {
       }
     }
   }
-
-  /**
-   * Get pending submissions for judging
-   * @param {number} limit - Maximum number of submissions to return
-   * @returns {Array} - Pending submissions
-   */
-  getPending(limit = 1) {
-    const pending = [];
-    for (const [id, data] of judgeStore.entries()) {
-      if (data.status === 'pending' || data.status === 'queued') {
-        pending.push({
-          judgeId: id,
-          ...data
-        });
-      }
-      if (pending.length >= limit) {
-        break;
-      }
-    }
-    return pending;
-  }
 }
 
 module.exports = new StoreService();

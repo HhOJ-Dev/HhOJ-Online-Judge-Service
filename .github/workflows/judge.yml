@@ -1,29 +1,29 @@
 name: HhOJ Online Judge
- 
+
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
- 
+
 jobs:
   judge:
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
- 
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
- 
+
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ gcc time curl jq
+          sudo apt-get install -y g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
           pip install requests
- 
+
       - name: Validate Secrets
         run: |
           if [ -z "${{ secrets.HHOJ_API_KEY }}" ]; then
@@ -39,41 +39,41 @@ jobs:
           echo "HHOJ_HOST = $HOST"
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "Secrets validation passed"
- 
+
       - name: Network Diagnostic
         run: |
           echo "=== DNS Resolution ==="
           HOSTNAME=$(echo "$HOST" | sed -E 's/^https?:\/\///' | sed -E 's/\/.*$//')
           echo "Hostname: $HOSTNAME"
           nslookup "$HOSTNAME" 2>&1 || echo "nslookup failed"
-          
+
           echo ""
           echo "=== Ping Test ==="
           ping -c 2 "$HOSTNAME" 2>&1 || echo "ping failed (may be blocked)"
-          
+
           echo ""
           echo "=== Curl HEAD Test ==="
           curl -sI --max-time 10 "$HOST" 2>&1 | head -20 || echo "curl HEAD failed"
- 
+
       - name: Fetch Submissions from API
         id: fetch
         run: |
           echo "Fetching pending submissions..."
-          
-          URL="${HOST}/api/judge_fetch?batch=1&inline_testcases=1"
+
+          URL="${HOST}/api/judge_fetch.php?batch=1&inline_testcases=1"
           echo "URL: $URL"
-          
+
           HTTP_CODE=$(curl -s -w "%{http_code}" -o submissions.json \
             --max-time 30 \
             --retry 3 \
             --retry-delay 2 \
             -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
             "$URL" 2>curl_error.log)
-          
+
           CURL_EXIT=$?
           echo "Curl exit code: $CURL_EXIT"
           echo "HTTP Status: $HTTP_CODE"
-          
+
           if [ $CURL_EXIT -ne 0 ]; then
             echo "Curl error (exit code $CURL_EXIT):"
             cat curl_error.log
@@ -83,36 +83,37 @@ jobs:
             echo "::error::curl failed with exit code $CURL_EXIT"
             exit 1
           fi
-          
+
           echo "Response preview:"
           head -c 1000 submissions.json
           echo ""
-          
+
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Failed to fetch submissions (HTTP $HTTP_CODE)"
             exit 1
           fi
-          
+
           SUCCESS=$(cat submissions.json | jq -r '.success' 2>/dev/null || echo "false")
           if [ "$SUCCESS" != "true" ]; then
             MSG=$(cat submissions.json | jq -r '.message' 2>/dev/null || echo "Unknown error")
             echo "::error::API error: $MSG"
             exit 1
           fi
-          
+
           COUNT=$(cat submissions.json | jq '.submissions | length' 2>/dev/null || echo "0")
           echo "count=$COUNT" >> $GITHUB_OUTPUT
           echo "Submissions fetched: $COUNT"
- 
+
       - name: Process Submissions
         if: steps.fetch.outputs.count > 0
         run: |
           cd blankend
           python3 judge.py \
             --api-key "${{ secrets.HHOJ_API_KEY }}" \
-            --host "$HOST" \
-            --submissions ../submissions.json
- 
+            --site-url "$HOST" \
+            --submissions ../submissions.json \
+            --work-dir ../judge_work
+
       - name: No Pending Submissions
         if: steps.fetch.outputs.count == 0
         run: |
@@ -122,7 +123,7 @@ jobs:
           echo "## HhOJ Judge Result" > summary.md
           echo "" >> summary.md
           echo "**Status**: No pending submissions" >> summary.md
- 
+
       - name: Generate Summary Report
         if: always()
         run: |
@@ -133,7 +134,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Verdict**: Unknown Error (UKE)" >> $GITHUB_STEP_SUMMARY
           fi
- 
+
       - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -148,4 +149,5 @@ jobs:
             run_error.log
             summary.md
             ans*.out
+            judge_work/
           if-no-files-found: ignore

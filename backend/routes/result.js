@@ -134,49 +134,4 @@ router.get('/list', (req, res) => {
   });
 });
 
-/**
- * GET /api/judge_fetch
- * Fetch pending submissions for GitHub Actions workflow
- * This is called by the judge workflow to get submissions to process
- */
-router.get('/judge_fetch', (req, res) => {
-  try {
-    const apiKey = req.headers['x-api-key'];
-    
-    if (!apiKey || apiKey !== process.env.HHOJ_API_KEY) {
-      return res.status(401).json({
-        success: false,
-        message: 'Unauthorized: Invalid API key'
-      });
-    }
-
-    const batch = parseInt(req.query.batch) || 1;
-    const pending = store.getPending(batch);
-
-    const submissions = pending.map(item => ({
-      id: item.judgeId,
-      language: item.language,
-      code: item.code,
-      testcases: item.testcases,
-      time_limit: item.config?.timeLimit || 2000,
-      memory_limit: item.config?.memoryLimit || 256,
-      submit_time: item.createdAt
-    }));
-
-    store.cleanup();
-
-    res.json({
-      success: true,
-      submissions: submissions
-    });
-
-  } catch (error) {
-    console.error('Judge fetch error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
-  }
-});
-
 module.exports = router;
