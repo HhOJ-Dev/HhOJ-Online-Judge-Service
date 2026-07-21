@@ -8,24 +8,30 @@ on:
 jobs:
   judge:
     runs-on: ubuntu-latest
-    container:
-      image: hhoj/judge-env:latest
-      # 预装了 g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
-      # 以及 Python 依赖 requests pycryptodome
-      # 如果镜像未发布到 Docker Hub，会自动 fallback 到下面的 Install Dependencies 步骤
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies (fallback if container image unavailable)
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            /usr/local/bin/g++
+            /usr/local/bin/gcc
+            /usr/lib/jvm
+            /usr/local/bin/mono
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Install Dependencies
         run: |
-          if ! command -v g++ &> /dev/null; then
-            echo "Compilers not found, installing..."
-            sudo apt-get update
-            sudo apt-get install -y g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
-          fi
-          pip install -q requests pycryptodome 2>/dev/null || true
+          echo "Installing compilers and dependencies..."
+          sudo apt-get update -y
+          sudo apt-get install -y g++ gcc default-jdk python3 python3-pip mono-complete fp-compiler curl jq
+          pip3 install --cache-dir ~/.cache/pip requests pycryptodome
 
       - name: Validate Secrets
         run: |
