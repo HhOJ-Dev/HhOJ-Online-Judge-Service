@@ -60,7 +60,7 @@ jobs:
         run: |
           echo "Fetching pending submissions..."
           
-          URL="${HOST}/api/judge_fetch.php?batch=1&inline_testcases=1"
+          URL="${HOST}/api/judge_fetch?batch=1&inline_testcases=1"
           echo "URL: $URL"
           
           HTTP_CODE=$(curl -s -w "%{http_code}" -o submissions.json \
