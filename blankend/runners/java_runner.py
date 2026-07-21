@@ -34,7 +34,6 @@ class JavaRunner:
         err_path = os.path.join(sub_dir, 'user.err')
 
         time_limit_s = time_limit_ms / 1000.0
-        memory_limit_mb = max(16, memory_limit_kb // 1024)
 
         try:
             with open(in_path, 'r', encoding='utf-8') as fin, \
@@ -43,7 +42,7 @@ class JavaRunner:
 
                 start_time = time.time()
                 proc = subprocess.Popen(
-                    ['java', f'-Xmx{memory_limit_mb}m', '-Xms{memory_limit_mb}m', '-cp', sub_dir, 'Main'],
+                    ['java', '-cp', sub_dir, 'Main'],
                     stdin=fin,
                     stdout=fout,
                     stderr=ferr
@@ -57,24 +56,11 @@ class JavaRunner:
                     return 'TLE', 0, 0
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
-                memory_used = self._get_memory_usage(proc.pid)
 
                 if proc.returncode != 0:
-                    return 'RE', elapsed_ms, memory_used
+                    return 'RE', elapsed_ms, 0
 
-                if memory_used > memory_limit_kb:
-                    return 'MLE', elapsed_ms, memory_used
-
-                return 'OK', elapsed_ms, memory_used
+                return 'OK', elapsed_ms, 0
 
         except Exception as e:
             return 'RE', 0, 0
-
-    def _get_memory_usage(self, pid):
-        try:
-            import psutil
-            process = psutil.Process(pid)
-            memory_info = process.memory_info()
-            return int(memory_info.rss / 1024)
-        except Exception:
-            return 0

@@ -4,6 +4,7 @@
  */
 
 const judgeStore = new Map();
+const wsManager = require('./wsManager');
 
 class StoreService {
   /**
@@ -36,10 +37,19 @@ class StoreService {
   update(judgeId, updates) {
     const existing = judgeStore.get(judgeId);
     if (existing) {
-      judgeStore.set(judgeId, {
+      const updated = {
         ...existing,
         ...updates,
         updatedAt: new Date().toISOString()
+      };
+      judgeStore.set(judgeId, updated);
+
+      // 通过 WebSocket 实时推送状态更新
+      wsManager.notify(judgeId, {
+        status: updated.status,
+        conclusion: updated.conclusion,
+        result: updated.result,
+        updatedAt: updated.updatedAt
       });
     }
   }

@@ -8,21 +8,24 @@ on:
 jobs:
   judge:
     runs-on: ubuntu-latest
+    container:
+      image: hhoj/judge-env:latest
+      # 预装了 g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
+      # 以及 Python 依赖 requests pycryptodome
+      # 如果镜像未发布到 Docker Hub，会自动 fallback 到下面的 Install Dependencies 步骤
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install Dependencies
+      - name: Install Dependencies (fallback if container image unavailable)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
-          pip install requests pycryptodome
+          if ! command -v g++ &> /dev/null; then
+            echo "Compilers not found, installing..."
+            sudo apt-get update
+            sudo apt-get install -y g++ gcc default-jdk python3 mono-complete fp-compiler curl jq
+          fi
+          pip install -q requests pycryptodome 2>/dev/null || true
 
       - name: Validate Secrets
         run: |
@@ -36,26 +39,7 @@ jobs:
           fi
           HOST="${{ secrets.HHOJ_HOST }}"
           HOST="${HOST%/}"
-          echo "HHOJ_HOST = $HOST"
           echo "HOST=$HOST" >> $GITHUB_ENV
-          echo "Secrets validation passed"
-
-      - name: Network Diagnostic
-        run: |
-          echo "=== DNS Resolution ==="
-          HOSTNAME=$(echo "$HOST" | sed -E 's/^https?:\/\///' | sed -E 's/\/.*$//')
-          echo "Hostname: $HOSTNAME"
-          nslookup "$HOSTNAME" 2>&1 || echo "nslookup failed"
-
-          echo ""
-          echo "=== Ping Test ==="
-          ping -c 2 "$HOSTNAME" 2>&1 || echo "ping failed (may be blocked)"
-
-          echo ""
-          echo "=== Curl HEAD Test ==="
-          curl -sIL --max-time 10 \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
-            "$HOST" 2>&1 | head -20 || echo "curl HEAD failed"
 
       - name: Fetch Submissions from API
         id: fetch
@@ -125,10 +109,6 @@ jobs:
             status.txt
             judge_result.json
             submissions.json
-            curl_error.log
-            compile_error.log
-            run_error.log
             summary.md
-            ans*.out
             judge_work/
           if-no-files-found: ignore

@@ -1,0 +1,39 @@
+# HhOJ Judge Environment
+# 预装所有评测所需编译器和依赖，消除每次 Actions 运行时的安装时间
+# 构建并推送到 Docker Hub:
+#   docker build -f Dockerfile.judge -t hhoj/judge-env:latest .
+#   docker push hhoj/judge-env:latest
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 预装所有编译器和工具链
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ \
+    gcc \
+    default-jdk \
+    python3 \
+    python3-pip \
+    mono-complete \
+    fp-compiler \
+    curl \
+    jq \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 预装 Python 依赖
+RUN pip3 install --no-cache-dir requests pycryptodome
+
+# 验证所有编译器可用
+RUN echo "Verifying compilers..." \
+    && g++ --version | head -1 \
+    && gcc --version | head -1 \
+    && java -version 2>&1 | head -1 \
+    && javac -version 2>&1 | head -1 \
+    && python3 --version \
+    && mono --version | head -1 \
+    && fpc -h | head -1 \
+    && echo "All compilers ready!"
+
+WORKDIR /workspace

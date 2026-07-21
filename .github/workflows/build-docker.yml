@@ -1,0 +1,39 @@
+name: Build Judge Docker Image
+
+# 当 Dockerfile.judge 变更时自动构建并推送镜像
+# 需要在仓库 Secrets 中配置 DOCKERHUB_USERNAME 和 DOCKERHUB_TOKEN
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'Dockerfile.judge'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.judge
+          push: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+          tags: |
+            hhoj/judge-env:latest
+            hhoj/judge-env:${{ github.sha }}
+          cache-from: type=registry,ref=hhoj/judge-env:latest
+          cache-to: type=inline
