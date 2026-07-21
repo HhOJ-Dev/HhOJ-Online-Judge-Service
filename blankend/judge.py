@@ -141,15 +141,24 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
     in_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.in")
     out_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.out")
 
-    if tc.get('inlined') and tc.get('input_data') and tc.get('output_data'):
-        try:
-            with open(in_path, 'wb') as f:
-                f.write(base64.b64decode(tc['input_data']))
-            with open(out_path, 'wb') as f:
-                f.write(base64.b64decode(tc['output_data']))
-            return in_path, out_path
-        except Exception:
-            pass
+    print(f"  [TC {tc.get('id')}] inlined={tc.get('inlined')}, has_input_data={bool(tc.get('input_data'))}, has_output_data={bool(tc.get('output_data'))}", file=sys.stderr)
+
+    if tc.get('inlined'):
+        if tc.get('input_data') and tc.get('output_data'):
+            try:
+                input_decoded = base64.b64decode(tc['input_data'])
+                output_decoded = base64.b64decode(tc['output_data'])
+                print(f"  [TC {tc.get('id')}] Decoded input: {repr(input_decoded[:100])}, output: {repr(output_decoded[:100])}", file=sys.stderr)
+                
+                with open(in_path, 'wb') as f:
+                    f.write(input_decoded)
+                with open(out_path, 'wb') as f:
+                    f.write(output_decoded)
+                return in_path, out_path
+            except Exception as e:
+                print(f"  [TC {tc.get('id')}] Base64 decode error: {e}", file=sys.stderr)
+        else:
+            print(f"  [TC {tc.get('id')}] Missing input_data or output_data", file=sys.stderr)
 
     if tc.get('input_url') and tc.get('output_url'):
         downloaded_in = download_testcase(tc['input_url'], session, cache_dir)
