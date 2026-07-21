@@ -53,7 +53,9 @@ jobs:
 
           echo ""
           echo "=== Curl HEAD Test ==="
-          curl -sI --max-time 10 "$HOST" 2>&1 | head -20 || echo "curl HEAD failed"
+          curl -sIL --max-time 10 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
+            "$HOST" 2>&1 | head -20 || echo "curl HEAD failed"
 
       - name: Fetch Submissions from API
         id: fetch
@@ -65,12 +67,16 @@ jobs:
 
           HTTP_CODE=$(curl -s -w "%{http_code}" -o submissions.json \
             --max-time 30 \
-            --retry 3 \
+            --retry 5 \
             --retry-delay 2 \
+            --retry-all-errors \
+            -L \
+            --http1.1 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
             -H "X-API-Key: ${{ secrets.HHOJ_API_KEY }}" \
-            "$URL" 2>curl_error.log)
+            "$URL" 2>curl_error.log) || CURL_EXIT=$?
 
-          CURL_EXIT=$?
+          CURL_EXIT=${CURL_EXIT:-0}
           echo "Curl exit code: $CURL_EXIT"
           echo "HTTP Status: $HTTP_CODE"
 
