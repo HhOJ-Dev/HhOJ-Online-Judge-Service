@@ -1,0 +1,3474 @@
+<?php
+// 函数库
+require_once 'config.php';
+require_once 'admin_roles.php';
+
+function getPageTitle($page, $first = '') {
+    $titles = [
+        'home'             => '首页',
+        'login'            => '登录',
+        'register'         => '注册',
+        'forum'            => '讨论区',
+        'forum_post'       => '帖子详情',
+        'articles'         => '专栏',
+        'article'          => '文章详情',
+        'write_article'    => '撰写文章',
+        'votes'            => '投票',
+        'vote_detail'      => '投票详情',
+        'tickets'          => '工单',
+        'ticket'           => '工单详情',
+        'users'            => '用户',
+        'user'             => '用户主页',
+        'profile'          => '个人设置',
+        'benben'           => '犇犇',
+        'taopian'          => '陶片',
+        'station'          => '站务',
+        'station_post'     => '站务详情',
+        'messages'         => '私信',
+        'notifications'    => '通知',
+        'search'           => '搜索',
+        'rules'            => '社区规则',
+        'updates'          => '更新简介',
+        'favorites'        => '收藏',
+        'forgot_password'  => '找回密码',
+        'banned'           => '账号封禁',
+        'login_required'   => '需要登录',
+        'cpoauth_callback' => 'CP OAuth',
+    ];
+    if ($page === 'home' || $first === '' || $first === 'index') {
+        return '首页 - ' . SITE_NAME;
+    }
+    $name = $titles[$page] ?? ($titles[$first] ?? '');
+    if ($name === '') {
+        return SITE_NAME;
+    }
+    return $name . ' - ' . SITE_NAME;
+}
+
+// 简单缓存：APCu 跨请求 + 请求内 static 双层
+function &_cacheStore() {
+    static $cache = [];
+    return $cache;
+}
+function cacheGet($key) {
+    $cache = &_cacheStore();
+    if (array_key_exists($key, $cache)) return $cache[$key];
+    if (function_exists('apcu_fetch') && apcu_exists($key)) {
+        $ok = false;
+        $v = apcu_fetch($key, $ok);
+        if ($ok) { $cache[$key] = $v; return $v; }
+    }
+    return null;
+}
+function cacheSet($key, $value, int $ttl = 0) {
+    $cache = &_cacheStore();
+    $cache[$key] = $value;
+    if (function_exists('apcu_store') && $ttl > 0) {
+        apcu_store($key, $value, $ttl);
+    }
+    return $value;
+}
+function cacheClear($key = null) {
+    $cache = &_cacheStore();
+    if ($key === null) {
+        $cache = [];
+        if (function_exists('apcu_clear_cache')) apcu_clear_cache();
+        return;
+    }
+    unset($cache[$key]);
+    if (function_exists('apcu_delete')) apcu_delete($key);
+}
+
+function isCaptchaVerified($ttlSeconds = 300) {
+    if (empty($_SESSION['captcha_verified_at'])) return false;
+    return time() - (int)$_SESSION['captcha_verified_at'] < $ttlSeconds;
+}
+function consumeCaptchaVerification() {
+    unset($_SESSION['captcha_verified_at']);
+}
+
+// CSRF Token（7 天有效期，匹配 session 生命周期，避免长开 tab 后过期）
+function generateCsrfToken(): string {
+    if (session_status() !== PHP_SESSION_ACTIVE) return '';
+    $now = time();
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
+        $_SESSION['csrf_token_expires'] = $now + 86400 * 7;
+    } elseif (!empty($_SESSION['csrf_token_expires']) && $_SESSION['csrf_token_expires'] < $now) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
+        $_SESSION['csrf_token_expires'] = $now + 86400 * 7;
+    }
+    return $_SESSION['csrf_token'];
+}
+function csrfTokenField(): string {
+    $t = generateCsrfToken();
+    if ($t === '') return '';
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars($t, ENT_QUOTES, 'UTF-8') . '">';
+}
+function verifyCsrfToken(?string $token = null): bool {
+    if (session_status() !== PHP_SESSION_ACTIVE) return false;
+    if (empty($_SESSION['csrf_token'])) return false;
+    // 过期检查（容错：1 小时内的过期 token 仍接受，避免边界场景失效）
+    if (!empty($_SESSION['csrf_token_expires'])) {
+        $expired = $_SESSION['csrf_token_expires'] < time();
+        $tooOld = $_SESSION['csrf_token_expires'] < time() - 3600;
+        if ($tooOld) {
+            error_log('[CSRF] token 已严重过期（>1h）');
+            return false;
+        }
+        // 1 小时内过期：自动续期并接受
+        if ($expired) {
+            $_SESSION['csrf_token_expires'] = time() + 86400 * 7;
+        }
+    }
+    if ($token === null) {
+        $token = $_POST['csrf_token'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+    }
+    if (!is_string($token) || $token === '') return false;
+    return hash_equals($_SESSION['csrf_token'], $token);
+}
+// Origin / Referer 校验，AJAX 端点兜底
+function verifyRequestOrigin(): bool {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if ($host === '') return false;
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    $referer = $_SERVER['HTTP_REFERER'] ?? '';
+    $expected = (($_SERVER['HTTPS'] ?? '') === 'on' ? 'https://' : 'http://') . $host;
+    if ($origin !== '') {
+        return strncmp($origin, $expected, strlen($expected)) === 0;
+    }
+    if ($referer !== '') {
+        return strncmp($referer, $expected, strlen($expected)) === 0;
+    }
+    return false;
+}
+
+// 限流：APCu 滑动窗口，无 APCu 时回退到 session
+function rateLimit(string $key, int $max, int $window): bool {
+    if ($max <= 0 || $window <= 0) return true;
+    if (function_exists('apcu_inc')) {
+        $fullKey = 'rl_' . $key;
+        $cur = apcu_inc($fullKey, 1, $found);
+        if (!$found) {
+            apcu_store($fullKey, 1, $window);
+            $cur = 1;
+        }
+        return $cur <= $max;
+    }
+    if (session_status() !== PHP_SESSION_ACTIVE) return true;
+    $sk = '_rl_' . $key;
+    $now = time();
+    $arr = $_SESSION[$sk] ?? [];
+    if (!is_array($arr)) $arr = [];
+    $arr = array_values(array_filter($arr, function ($t) use ($now, $window) { return $t > $now - $window; }));
+    if (count($arr) >= $max) {
+        $_SESSION[$sk] = $arr;
+        return false;
+    }
+    $arr[] = $now;
+    $_SESSION[$sk] = $arr;
+    return true;
+}
+function rateLimitByIp(string $action, int $max, int $window): bool {
+    $ip = getUserIP();
+    return rateLimit('ip_' . $action . '_' . $ip, $max, $window);
+}
+function rateLimitByUser(string $action, int $max, int $window): bool {
+    $uid = $_SESSION['user_id'] ?? 0;
+    if ($uid > 0) {
+        return rateLimit('u_' . $action . '_' . $uid, $max, $window);
+    }
+    $sid = session_id() ?: 'anon';
+    return rateLimit('s_' . $action . '_' . $sid, $max, $window);
+}
+function rateLimitRemaining(string $key, int $max, int $window): int {
+    if (function_exists('apcu_fetch') && apcu_exists('rl_' . $key)) {
+        $v = apcu_fetch('rl_' . $key, $ok);
+        if ($ok) return max(0, $max - (int)$v);
+    }
+    return $max;
+}
+function rateLimitExceededResponse(string $action = '请求', int $retry = 60) {
+    http_response_code(429);
+    header('Retry-After: ' . $retry);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['success' => false, 'message' => '操作过于频繁，请稍后再试（' . $action . '）']);
+    exit;
+}
+
+// 全局熔断：1 秒内 > 30 次请求 → 触发 60 秒
+function globalCircuitBreaker(string $ip): void {
+    if ($ip === '' || $ip === '0.0.0.0') return;
+    if (!function_exists('apcu_inc')) return;
+    $cbKey = 'cb_' . $ip;
+    if (apcu_exists('cb_lock_' . $ip)) {
+        $lockExp = (int)apcu_fetch('cb_lock_' . $ip, $ok);
+        if ($ok && $lockExp > time()) {
+            http_response_code(429);
+            header('Retry-After: ' . max(1, $lockExp - time()));
+            header('Content-Type: text/html; charset=utf-8');
+            echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>请求过于频繁</title></head><body style="font-family:system-ui;background:#0f1020;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div style="text-align:center;padding:2rem;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);max-width:480px"><h2 style="margin:0 0 .5rem;color:#f59e0b">请求过于频繁</h2><p style="margin:0;color:#9ca3af">系统检测到您的访问频率异常，已暂时限制访问。请稍后再试。</p></div></body></html>';
+            exit;
+        }
+        apcu_delete('cb_lock_' . $ip);
+    }
+    $cur = apcu_inc($cbKey, 1, $found);
+    if (!$found) {
+        apcu_store($cbKey, 1, 1);
+        $cur = 1;
+    }
+    if ($cur > 30) {
+        apcu_store('cb_lock_' . $ip, time() + 60, 60);
+        apcu_delete($cbKey);
+        try {
+            $db = getDB();
+            $db->prepare("INSERT IGNORE INTO banned_ips (ip, reason, created_by, expires_at) VALUES (?, ?, NULL, ?)")
+               ->execute([$ip, '自动熔断：1秒内请求超过30次', date('Y-m-d H:i:s', time() + 60)]);
+        } catch (Throwable $e) {
+            error_log('[globalCircuitBreaker] insert banned_ips failed: ' . $e->getMessage());
+        }
+        cacheClear('ip_banned_' . $ip);
+        http_response_code(429);
+        header('Retry-After: 60');
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>请求过于频繁</title></head><body style="font-family:system-ui;background:#0f1020;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div style="text-align:center;padding:2rem;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);max-width:480px"><h2 style="margin:0 0 .5rem;color:#ef4444">触发熔断</h2><p style="margin:0;color:#9ca3af">您在短时间内发起大量请求，已被临时限制访问 60 秒。</p></div></body></html>';
+        exit;
+    }
+}
+
+// 登录失败计数：IP 维度 5 分钟 10 次 → 封 30 分钟；账号维度 5 分钟 5 次 → 锁 15 分钟
+function recordLoginFailure(string $username, string $ip): void {
+    $t = time();
+    if (!function_exists('apcu_inc')) return;
+    $k1 = 'lf_ip_' . $ip;
+    $c1 = apcu_inc($k1, 1, $f);
+    if (!$f) { apcu_store($k1, 1, 300); $c1 = 1; }
+    if ($c1 >= 10) {
+        try {
+            $db = getDB();
+            $db->prepare("INSERT IGNORE INTO banned_ips (ip, reason, created_by, expires_at) VALUES (?, ?, NULL, ?)")
+               ->execute([$ip, '登录失败次数过多（' . $username . '）', date('Y-m-d H:i:s', $t + 1800)]);
+        } catch (Throwable $e) {
+            error_log('[recordLoginFailure] insert banned_ips failed: ' . $e->getMessage());
+        }
+        cacheClear('ip_banned_' . $ip);
+        apcu_delete($k1);
+    }
+    $k2 = 'lf_u_' . md5($username);
+    $c2 = apcu_inc($k2, 1, $f2);
+    if (!$f2) { apcu_store($k2, 1, 300); $c2 = 1; }
+    if ($c2 >= 5) {
+        apcu_store('lf_lock_' . md5($username), $t + 900, 900);
+        apcu_delete($k2);
+    }
+}
+function isAccountLocked(string $username): bool {
+    if (!function_exists('apcu_fetch')) return false;
+    $v = apcu_fetch('lf_lock_' . md5($username), $ok);
+    if (!$ok) return false;
+    if ((int)$v < time()) {
+        apcu_delete('lf_lock_' . md5($username));
+        return false;
+    }
+    return true;
+}
+function clearLoginFailure(string $username): void {
+    if (function_exists('apcu_delete')) {
+        apcu_delete('lf_u_' . md5($username));
+        apcu_delete('lf_lock_' . md5($username));
+    }
+}
+
+// 用户每日活动限额：返回 [已用, 上限]
+function getUserDailyUsage(int $userId, string $action): array {
+    if ($userId <= 0) return [0, 0];
+    $limits = [
+        'forum_post'   => 30,
+        'forum_reply'  => 100,
+        'station_post' => 20,
+        'benben_post'  => 50,
+        'article'      => 10,
+        'message'      => 100,
+        'ticket'       => 10,
+        'submission'   => 200,
+    ];
+    $max = $limits[$action] ?? 0;
+    if ($max <= 0) return [0, 0];
+    $cacheKey = 'daily_' . $action . '_' . $userId . '_' . date('Ymd');
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return [(int)$cached, $max];
+    $used = 0;
+    try {
+        $db = getDB();
+        $stmt = $db->prepare("SELECT count FROM daily_activity_log WHERE user_id = ? AND action = ? AND date = CURDATE()");
+        $stmt->execute([$userId, $action]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $used = $row ? (int)$row['count'] : 0;
+    } catch (Throwable $e) {
+        error_log('[getUserDailyUsage] failed: ' . $e->getMessage());
+    }
+    cacheSet($cacheKey, $used, 300);
+    return [$used, $max];
+}
+function incrementUserDailyUsage(int $userId, string $action, int $delta = 1): void {
+    if ($userId <= 0 || $delta <= 0) return;
+    $cacheKey = 'daily_' . $action . '_' . $userId . '_' . date('Ymd');
+    try {
+        $db = getDB();
+        $db->prepare("INSERT INTO daily_activity_log (user_id, action, date, count) VALUES (?, ?, CURDATE(), ?)
+                      ON DUPLICATE KEY UPDATE count = count + VALUES(count)")
+           ->execute([$userId, $action, $delta]);
+    } catch (Throwable $e) {
+        error_log('[incrementUserDailyUsage] failed: ' . $e->getMessage());
+    }
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) cacheSet($cacheKey, (int)$cached + $delta, 300);
+    else cacheSet($cacheKey, $delta, 300);
+}
+function checkUserDailyLimit(int $userId, string $action): bool {
+    [$used, $max] = getUserDailyUsage($userId, $action);
+    if ($max <= 0) return true;
+    return $used < $max;
+}
+
+function safe_substr($str, $start, $length = null) {
+    if (function_exists('mb_substr')) {
+        return mb_substr($str, $start, $length, 'UTF-8');
+    }
+    return substr($str, $start, $length);
+}
+
+// 将相对路径规范化为站点根的绝对路径，避免在详情页（如 /discuss/123）下被浏览器错误解析
+function assetUrl($u) {
+    if ($u === null || $u === '') return '';
+    $u = trim($u);
+    if ($u === '') return '';
+    if (preg_match('#^(https?:)?//#i', $u)) return $u;
+    if (stripos($u, 'data:') === 0) return $u;
+    if (strpos($u, '#') === 0) return $u;
+    if (stripos($u, 'mailto:') === 0) return $u;
+    if (stripos($u, 'javascript:') === 0) return '';
+    if (strpos($u, '/') === 0) return $u;
+    return '/' . ltrim($u, '/');
+}
+
+// 安全重定向路径校验：防止开放重定向
+function safeRedirectPath(string $path, string $fallback = '/index'): string {
+    if (strpos($fallback, '/') !== 0 || strpos($fallback, '//') === 0 || strpos($fallback, '/\\') === 0) {
+        $fallback = '/index';
+    }
+    if ($path === '') return $fallback;
+    if (strpos($path, '/') !== 0) return $fallback;
+    if (strpos($path, '//') === 0 || strpos($path, '/\\') === 0) return $fallback;
+    if (strpbrk($path, "\r\n") !== false) return $fallback;
+    if (preg_match('#^[a-zA-Z][a-zA-Z0-9+.\-]*:#', $path)) return $fallback;
+    return $path;
+}
+
+// 安全图片上传校验：扩展名白名单 + finfo_file MIME + GD 真图验证
+function validateImageUpload(string $tmpName, string $origName, int $maxSize = 2097152): array {
+    if (!is_uploaded_file($tmpName)) {
+        return ['ok' => false, 'ext' => '', 'error' => '非法的上传文件'];
+    }
+    $fileSize = filesize($tmpName);
+    if ($fileSize === false || $fileSize <= 0) {
+        return ['ok' => false, 'ext' => '', 'error' => '文件为空'];
+    }
+    if ($fileSize > $maxSize) {
+        return ['ok' => false, 'ext' => '', 'error' => '文件大小超过限制'];
+    }
+    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+    $allowedExt = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+    if (!in_array($ext, $allowedExt, true)) {
+        return ['ok' => false, 'ext' => '', 'error' => '仅支持 JPG/PNG/GIF/WebP 格式'];
+    }
+    if (function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo) {
+            $mime = finfo_file($finfo, $tmpName);
+            finfo_close($finfo);
+            $allowedMime = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            if (!in_array($mime, $allowedMime, true)) {
+                return ['ok' => false, 'ext' => '', 'error' => '文件类型不允许（检测到 ' . $mime . '）'];
+            }
+        }
+    }
+    if (function_exists('getimagesize')) {
+        $info = @getimagesize($tmpName);
+        if ($info === false || !isset($info[2]) || $info[2] === 0) {
+            return ['ok' => false, 'ext' => '', 'error' => '不是有效的图片文件'];
+        }
+    }
+    return ['ok' => true, 'ext' => $ext, 'error' => ''];
+}
+
+// 头像 URL：有上传头像用上传的，否则生成首字母 SVG 兜底
+function avatarUrl($user) {
+    if (!empty($user['avatar'])) return htmlspecialchars(assetUrl($user['avatar']));
+    $name = $user['username'] ?? 'U';
+
+    $cacheKey = 'avatar_' . $name;
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+
+    $initial = safe_substr($name, 0, 1);
+    $hash = md5($name);
+    $r = hexdec(substr($hash, 0, 2));
+    $g = hexdec(substr($hash, 2, 2));
+    $b = hexdec(substr($hash, 4, 2));
+    $max = max($r, $g, $b);
+    $min = min($r, $g, $b);
+    $l = ($max + $min) / 2 / 255;
+    $targetL = 0.45;
+    if ($l > 0.01) {
+        $ratio = $targetL / $l;
+        $r = min(255, max(0, (int)($r * $ratio)));
+        $g = min(255, max(0, (int)($g * $ratio)));
+        $b = min(255, max(0, (int)($b * $ratio)));
+    }
+    $bgColor = sprintf('#%02x%02x%02x', $r, $g, $b);
+    $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">'
+         . '<rect width="128" height="128" fill="' . $bgColor . '"/>'
+         . '<text x="50%" y="50%" font-size="56" fill="#fff" text-anchor="middle" dominant-baseline="central" font-family="Arial,sans-serif" font-weight="600">'
+         . htmlspecialchars($initial)
+         . '</text></svg>';
+    return cacheSet($cacheKey, 'data:image/svg+xml;base64,' . base64_encode($svg));
+}
+function getUserBackgroundUrl($user) {
+    if (!$user || empty($user['background_image'])) return '';
+    return htmlspecialchars(assetUrl($user['background_image']));
+}
+function icon(string $name, int $size = 20, string $class = ''): string {
+    static $cache = [];
+    $cacheKey = $name . '|' . $size . '|' . $class;
+    if (isset($cache[$cacheKey])) return $cache[$cacheKey];
+
+    $svg = '';
+    $path = __DIR__ . '/assets/icons/' . $name . '.svg';
+    if (file_exists($path)) {
+        $svg = @file_get_contents($path) ?: '';
+    }
+    if ($svg === '') {
+        $svg = icon_builtin($name);
+    }
+    if ($svg !== '') {
+        $svg = preg_replace('/<svg/', '<svg width="' . $size . '" height="' . $size . '" class="icon ' . htmlspecialchars($class) . '"', $svg, 1);
+    }
+    return $cache[$cacheKey] = $svg;
+}
+
+// 内置 SVG 图标字典（Feather Icons 风格，颜色继承 currentColor）
+function icon_builtin(string $name): string {
+    static $dict = null;
+    if ($dict !== null && isset($dict['__loaded__'])) {
+        return $dict[$name] ?? '';
+    }
+    $p = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+    $dict = [
+        '__loaded__' => true,
+        'home'         => '<svg '.$p.'><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>',
+        'forum'        => '<svg '.$p.'><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>',
+        'benben'       => '<svg '.$p.'><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>',
+        'book-open'    => '<svg '.$p.'><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>',
+        'code-square'  => '<svg '.$p.'><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><polyline points="9 9 7 12 9 15"></polyline><polyline points="15 9 17 12 15 15"></polyline></svg>',
+        'scroll'       => '<svg '.$p.'><path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4"></path><path d="M19 17V5a2 2 0 0 0-2-2H4"></path></svg>',
+        'tickets'      => '<svg '.$p.'><path d="M3 7v2a2 2 0 0 1 0 4v2a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2a2 2 0 0 1 0-4V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2z"></path><line x1="13" y1="5" x2="13" y2="19"></line></svg>',
+        'users'        => '<svg '.$p.'><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>',
+        'star'         => '<svg '.$p.'><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>',
+        'taopian'      => '<svg '.$p.'><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"></polygon><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>',
+        'lightbulb'    => '<svg '.$p.'><line x1="9" y1="18" x2="15" y2="18"></line><line x1="10" y1="22" x2="14" y2="22"></line><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"></path></svg>',
+        'warning'      => '<svg '.$p.'><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
+        'theme'        => '<svg '.$p.'><circle cx="12" cy="12" r="10"></circle><path d="M12 2a10 10 0 0 0 0 20z" fill="currentColor" stroke="none"></path></svg>',
+        'messages'     => '<svg '.$p.'><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>',
+        'notifications' => '<svg '.$p.'><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>',
+        'profile'      => '<svg '.$p.'><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>',
+        'folder'       => '<svg '.$p.'><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>',
+        'admin'        => '<svg '.$p.'><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
+        'files'        => '<svg '.$p.'><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="13" y2="17"></line></svg>',
+        'logout'       => '<svg '.$p.'><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>',
+        'announcement' => '<svg '.$p.'><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>',
+        'settings'     => '<svg '.$p.'><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>',
+        'heart'        => '<svg '.$p.'><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>',
+        'sun'          => '<svg '.$p.'><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>',
+        'moon'         => '<svg '.$p.'><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>',
+        'monitor'      => '<svg '.$p.'><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>',
+        'clock'        => '<svg '.$p.'><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
+        'database'     => '<svg '.$p.'><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 5v14a9 3 0 0 1-18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>',
+        'tag'          => '<svg '.$p.'><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>',
+        'code'         => '<svg '.$p.'><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>',
+        'list'         => '<svg '.$p.'><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>',
+        'bar-chart'    => '<svg '.$p.'><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>',
+        'check-circle' => '<svg '.$p.'><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>',
+        'alert-circle' => '<svg '.$p.'><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>',
+    ];
+    return $dict[$name] ?? '';
+}
+function renderAvatar($user, $size = 32) {
+    $url = avatarUrl($user);
+    $hasName = !empty($user['username'] ?? '');
+    $style = 'width:' . $size . 'px;height:' . $size . 'px;border-radius:50%;object-fit:cover;flex-shrink:0;background:' . ($hasName ? '#cbd5e1' : '#94a3b8') . ';font-size:0;';
+    return '<img src="' . $url . '" alt="" style="' . $style . '" loading="lazy" decoding="async">';
+}
+function getPageParam() {
+    $p = isset($_GET['p']) ? (int)$_GET['p'] : 1;
+    return max(1, $p);
+}
+function paginationHtml($currentPage, $totalPages, $baseUrl, $pageParam = 'p') {
+    if ($totalPages <= 1) return '';
+    $sep = strpos($baseUrl, '?') !== false ? '&' : '?';
+    $html = '<div class="pagination">';
+    if ($currentPage > 1) {
+        $html .= '<a href="' . $baseUrl . $sep . $pageParam . '=' . ($currentPage - 1) . '" class="btn btn-sm btn-primary">上一页</a>';
+    }
+    $start = max(1, $currentPage - 2);
+    $end = min($totalPages, $currentPage + 2);
+    for ($i = $start; $i <= $end; $i++) {
+        if ($i == $currentPage) {
+            $html .= '<span class="btn btn-sm" style="background:var(--accent);color:#fff;">' . $i . '</span>';
+        } else {
+            $html .= '<a href="' . $baseUrl . $sep . $pageParam . '=' . $i . '" class="btn btn-sm">' . $i . '</a>';
+        }
+    }
+    if ($currentPage < $totalPages) {
+        $html .= '<a href="' . $baseUrl . $sep . $pageParam . '=' . ($currentPage + 1) . '" class="btn btn-sm btn-primary">下一页</a>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+function getLikeCount($postType, $postId) {
+    $cacheKey = "likes_count_{$postType}_{$postId}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM post_likes WHERE post_type = ? AND post_id = ?");
+        $stmt->execute([$postType, $postId]);
+        return cacheSet($cacheKey, (int)$stmt->fetchColumn());
+    } catch (PDOException $e) {
+        error_log('[getLikeCount] failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+function hasLiked($userId, $postType, $postId) {
+    $cacheKey = "likes_user_{$userId}_{$postType}_{$postId}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT 1 FROM post_likes WHERE user_id = ? AND post_type = ? AND post_id = ?");
+        $stmt->execute([$userId, $postType, $postId]);
+        return cacheSet($cacheKey, $stmt->fetchColumn() > 0);
+    } catch (PDOException $e) {
+        error_log('[hasLiked] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+function columnExists($table, $column) {
+    $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
+    $column = preg_replace('/[^a-zA-Z0-9_]/', '', $column);
+    if ($table === '' || $column === '') return false;
+    $cacheKey = "col_exists_{$table}_{$column}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        return cacheSet($cacheKey, $stmt->fetchColumn() !== false);
+    } catch (PDOException $e) {
+        error_log('[columnExists] failed: ' . $e->getMessage());
+        return cacheSet($cacheKey, false);
+    }
+}
+function tableExists($table) {
+    $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
+    if ($table === '') return false;
+    $cacheKey = "table_exists_{$table}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->query("SHOW TABLES LIKE '{$table}'");
+        return cacheSet($cacheKey, $stmt->fetchColumn() !== false);
+    } catch (PDOException $e) {
+        error_log('[tableExists] failed: ' . $e->getMessage());
+        return cacheSet($cacheKey, false);
+    }
+}
+function clearLikeCache($userId, $postType, $postId) {
+    cacheClear("likes_count_{$postType}_{$postId}");
+    cacheClear("likes_user_{$userId}_{$postType}_{$postId}");
+}
+function getFavoriteCount($targetType, $targetId) {
+    $cacheKey = "fav_count_{$targetType}_{$targetId}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM favorites WHERE target_type = ? AND target_id = ?");
+        $stmt->execute([$targetType, $targetId]);
+        return cacheSet($cacheKey, (int)$stmt->fetchColumn());
+    } catch (PDOException $e) {
+        error_log('[getFavoriteCount] failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+function hasFavorited($userId, $targetType, $targetId) {
+    $cacheKey = "fav_user_{$userId}_{$targetType}_{$targetId}";
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT 1 FROM favorites WHERE user_id = ? AND target_type = ? AND target_id = ?");
+        $stmt->execute([$userId, $targetType, $targetId]);
+        return cacheSet($cacheKey, $stmt->fetchColumn() > 0);
+    } catch (PDOException $e) {
+        error_log('[hasFavorited] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+function toggleFavorite($userId, $targetType, $targetId) {
+    cacheClear("fav_count_{$targetType}_{$targetId}");
+    cacheClear("fav_user_{$userId}_{$targetType}_{$targetId}");
+    $db = getDB();
+    try {
+        if (hasFavorited($userId, $targetType, $targetId)) {
+            $stmt = $db->prepare("DELETE FROM favorites WHERE user_id = ? AND target_type = ? AND target_id = ?");
+            $stmt->execute([$userId, $targetType, $targetId]);
+            return ['status' => 'removed', 'favorited' => false];
+        }
+        $stmt = $db->prepare("INSERT INTO favorites (user_id, target_type, target_id) VALUES (?, ?, ?)");
+        $stmt->execute([$userId, $targetType, $targetId]);
+        return ['status' => 'added', 'favorited' => true];
+    } catch (PDOException $e) {
+        // 表结构异常时自动修复并重试一次
+        ensureFavoritesTable();
+        try {
+            if (hasFavorited($userId, $targetType, $targetId)) {
+                $stmt = $db->prepare("DELETE FROM favorites WHERE user_id = ? AND target_type = ? AND target_id = ?");
+                $stmt->execute([$userId, $targetType, $targetId]);
+                return ['status' => 'removed', 'favorited' => false];
+            }
+            $stmt = $db->prepare("INSERT INTO favorites (user_id, target_type, target_id) VALUES (?, ?, ?)");
+            $stmt->execute([$userId, $targetType, $targetId]);
+            return ['status' => 'added', 'favorited' => true];
+        } catch (PDOException $e2) {
+            error_log('[toggleFavorite] failed: ' . $e2->getMessage());
+            return ['status' => 'error', 'message' => '操作失败，请稍后重试', 'favorited' => false];
+        }
+    }
+}
+
+// 确保 favorites 表结构正确
+function ensureFavoritesTable() {
+    $db = getDB();
+    try {
+        $stmt = $db->query("SHOW COLUMNS FROM favorites");
+        $cols = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $cols = array_map('strtolower', $cols);
+        if (!in_array('target_type', $cols, true) || !in_array('target_id', $cols, true)) {
+            $db->exec("DROP TABLE IF EXISTS favorites");
+            $db->exec("CREATE TABLE favorites (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                target_type VARCHAR(20) NOT NULL,
+                target_id INT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_target (target_type, target_id),
+                UNIQUE KEY uk_favorite (user_id, target_type, target_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        }
+    } catch (PDOException $e) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS favorites (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                target_type VARCHAR(20) NOT NULL,
+                target_id INT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_target (target_type, target_id),
+                UNIQUE KEY uk_favorite (user_id, target_type, target_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        } catch (PDOException $e2) {
+            error_log('[ensureFavoritesTable] failed: ' . $e2->getMessage());
+        }
+    }
+}
+
+// 确保 post_likes 表结构正确
+function ensurePostLikesTable() {
+    $db = getDB();
+    try {
+        $stmt = $db->query("SHOW COLUMNS FROM post_likes");
+        $cols = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $cols = array_map('strtolower', $cols);
+        if (!in_array('post_type', $cols, true) || !in_array('post_id', $cols, true)) {
+            $db->exec("DROP TABLE IF EXISTS post_likes");
+            $db->exec("CREATE TABLE post_likes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                post_type VARCHAR(20) NOT NULL,
+                post_id INT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_post (post_type, post_id),
+                UNIQUE KEY uk_like (user_id, post_type, post_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        }
+    } catch (PDOException $e) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS post_likes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                post_type VARCHAR(20) NOT NULL,
+                post_id INT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_id (user_id),
+                INDEX idx_post (post_type, post_id),
+                UNIQUE KEY uk_like (user_id, post_type, post_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        } catch (PDOException $e2) {
+            error_log('[ensurePostLikesTable] failed: ' . $e2->getMessage());
+        }
+    }
+}
+function clearFavoriteCache($userId, $targetType, $targetId) {
+    cacheClear("fav_count_{$targetType}_{$targetId}");
+    cacheClear("fav_user_{$userId}_{$targetType}_{$targetId}");
+}
+// 一次性迁移历史 role 值：红名 → 普通用户；紫名 → 管理员
+function migrateLegacyRoles() {
+    $cacheKey = 'roles_migrated_v1';
+    if (cacheGet($cacheKey)) return;
+    $db = getDB();
+    try {
+        $db->exec("UPDATE users SET role = '普通用户' WHERE role = '红名'");
+        $db->exec("UPDATE users SET role = '管理员' WHERE role = '紫名'");
+        cacheSet($cacheKey, true);
+    } catch (PDOException $e) {
+        error_log('[migrateLegacyRoles] failed: ' . $e->getMessage());
+    }
+}
+// 当前生效的全站公告
+function getActiveAnnouncements($limit = 5) {
+    $ck = 'announcements_' . (int)$limit;
+    $v = cacheGet($ck);
+    if ($v !== null) return $v;
+    $db = getDB();
+    try {
+        // ATTR_EMULATE_PREPARES=false 模式下 LIMIT ? 必须用 bindValue(PARAM_INT)
+        $stmt = $db->prepare("SELECT * FROM site_announcements WHERE is_active = 1 ORDER BY sort_order ASC, created_at DESC LIMIT ?");
+        $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
+        $stmt->execute();
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        cacheSet($ck, $rows, 60);
+        return $rows;
+    } catch (PDOException $e) {
+        error_log('[getActiveAnnouncements] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getUserFavorites($user_id, $limit = 50, $offset = 0) {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT * FROM favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?");
+        $stmt->bindValue(1, (int)$user_id, PDO::PARAM_INT);
+        $stmt->bindValue(2, (int)$limit, PDO::PARAM_INT);
+        $stmt->bindValue(3, (int)$offset, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log('[getUserFavorites] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+function getFavoriteItemInfo($target_type, $target_id) {
+    $db = getDB();
+    $info = ['title' => '', 'author' => '', 'url' => '', 'type_label' => '', 'created_at' => ''];
+    try {
+        switch ($target_type) {
+            case 'forum':
+                $stmt = $db->prepare("SELECT p.*, u.username, u.nickname FROM forum_posts p LEFT JOIN users u ON p.user_id = u.id WHERE p.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = $row['title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/discuss/' . $target_id;
+                    $info['type_label'] = '讨论区帖子';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'forum_reply':
+                $stmt = $db->prepare("SELECT r.*, u.username, u.nickname, p.id as post_id, p.title as post_title FROM forum_replies r LEFT JOIN users u ON r.user_id = u.id JOIN forum_posts p ON r.post_id = p.id WHERE r.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = '回复：' . $row['post_title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/discuss/' . $row['post_id'];
+                    $info['type_label'] = '讨论区回复';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'station':
+                $stmt = $db->prepare("SELECT p.*, u.username, u.nickname FROM station_posts p LEFT JOIN users u ON p.user_id = u.id WHERE p.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = $row['title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/station/' . $target_id;
+                    $info['type_label'] = '站务公告';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'station_reply':
+                $stmt = $db->prepare("SELECT r.*, u.username, u.nickname, p.id as post_id, p.title as post_title FROM station_replies r LEFT JOIN users u ON r.user_id = u.id JOIN station_posts p ON r.post_id = p.id WHERE r.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = '回复：' . $row['post_title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/station/' . $row['post_id'];
+                    $info['type_label'] = '站务回复';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'benben':
+                $stmt = $db->prepare("SELECT b.*, u.username, u.nickname FROM benben_posts b LEFT JOIN users u ON b.user_id = u.id WHERE b.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = mb_substr(strip_tags(renderMarkdown($row['content'])), 0, 50);
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/benben';
+                    $info['type_label'] = '犇犇';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'benben_reply':
+                $stmt = $db->prepare("SELECT r.*, u.username, u.nickname, b.id as post_id FROM benben_replies r LEFT JOIN users u ON r.user_id = u.id JOIN benben_posts b ON r.post_id = b.id WHERE r.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = mb_substr(strip_tags(renderMarkdown($row['content'])), 0, 50);
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : $row['username'];
+                    $info['url'] = '/benben';
+                    $info['type_label'] = '犇犇回复';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'ticket':
+                $stmt = $db->prepare("SELECT t.*, u.username, u.nickname FROM tickets t LEFT JOIN users u ON t.user_id = u.id WHERE t.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = $row['title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : ($row['username'] ?? '未知用户');
+                    $info['url'] = '/ticket/' . $target_id;
+                    $info['type_label'] = '工单';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+            case 'ticket_reply':
+                $stmt = $db->prepare("SELECT r.*, u.username, u.nickname, t.id as ticket_id, t.title as ticket_title FROM ticket_replies r LEFT JOIN users u ON r.user_id = u.id JOIN tickets t ON r.ticket_id = t.id WHERE r.id = ?");
+                $stmt->execute([$target_id]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    $info['title'] = '回复：' . $row['ticket_title'];
+                    $info['author'] = !empty($row['nickname']) ? $row['nickname'] : ($row['username'] ?? '系统');
+                    $info['url'] = '/ticket/' . $row['ticket_id'];
+                    $info['type_label'] = '工单回复';
+                    $info['created_at'] = $row['created_at'];
+                }
+                break;
+        }
+    } catch (PDOException $e) {
+        error_log('[getFavoriteItemInfo] failed: ' . $e->getMessage());
+    }
+    return $info;
+}
+function renderLikeFavoriteBar($user, $targetType, $targetId, $redirect, $compact = false) {
+    $likeCount = getLikeCount($targetType, $targetId);
+    $hasLiked = $user ? hasLiked($user['id'], $targetType, $targetId) : false;
+    $favCount = getFavoriteCount($targetType, $targetId);
+    $hasFaved = $user ? hasFavorited($user['id'], $targetType, $targetId) : false;
+    $size = $compact ? 14 : 16;
+    $html = '<div class="action-bar" style="display:inline-flex;align-items:center;gap:8px;">';
+    $likeIcon = icon('heart', $size, 'like-icon');
+    $html .= '<button type="button" class="like-btn ' . ($hasLiked ? 'liked' : '') . '" aria-label="点赞" onclick="submitLikeFavorite(this,\'like_post\',\'' . htmlspecialchars($targetType) . '\',' . (int)$targetId . ',\'' . htmlspecialchars($redirect) . '\')">' . $likeIcon . ' <span>' . $likeCount . '</span></button>';
+    $favIcon = icon('star', $size, 'favorite-icon');
+    $favClass = 'like-btn ' . ($hasFaved ? 'favorite-active' : '');
+    $html .= '<button type="button" class="' . $favClass . '" aria-label="收藏" onclick="submitLikeFavorite(this,\'favorite_post\',\'' . htmlspecialchars($targetType) . '\',' . (int)$targetId . ',\'' . htmlspecialchars($redirect) . '\')">' . $favIcon . ' <span>' . $favCount . '</span></button>';
+    $html .= '</div>';
+    return $html;
+}
+// 显示名称：优先昵称，点击跳转用户主页，颜色与洛谷同步
+function renderShowUsername($userRow) {
+    $uid = $userRow['user_id'] ?? ($userRow['id'] ?? 0);
+    $profileUrl = $uid > 0 ? '/user/' . (int)$uid : '';
+    if (!empty($userRow['banned']) && $userRow['banned'] == 1) {
+        $html = '<span style="color:var(--danger);font-weight:700;">封禁用户</span>';
+        return $profileUrl ? '<a href="' . $profileUrl . '" class="user-link">' . $html . '</a>' : $html;
+    }
+    $color = getUserDisplayColor($userRow);
+    $displayName = !empty($userRow['nickname']) ? $userRow['nickname'] : ($userRow['username'] ?? '未知用户');
+    $usernameHtml = '<span style="color:' . $color . ';font-weight:700;">' . htmlspecialchars($displayName) . '</span>';
+    $tag = htmlspecialchars(!empty($userRow['luogu_hook']) ? $userRow['luogu_hook'] : ($userRow['tag'] ?? ''));
+    if ($tag !== '') {
+        $usernameHtml .= ' <span class="custom-tag" style="color:' . $color . ';font-weight:700;">' . $tag . '</span>';
+    }
+    if ($profileUrl) {
+        $usernameHtml = '<a href="' . $profileUrl . '" class="user-link" style="text-decoration:none;">' . $usernameHtml . '</a>';
+    }
+    return $usernameHtml;
+}
+
+// 显示名称（含用户名悬停提示）
+function renderShowNameWithTooltip($userRow) {
+    $uid = $userRow['user_id'] ?? ($userRow['id'] ?? 0);
+    $profileUrl = $uid > 0 ? '/user/' . (int)$uid : '';
+    if (!empty($userRow['banned']) && $userRow['banned'] == 1) {
+        $html = '<span style="color:var(--danger);font-weight:700;">封禁用户</span>';
+        return $profileUrl ? '<a href="' . $profileUrl . '" class="user-link">' . $html . '</a>' : $html;
+    }
+    $color = getUserDisplayColor($userRow);
+    $displayName = !empty($userRow['nickname']) ? $userRow['nickname'] : ($userRow['username'] ?? '未知用户');
+    $username = htmlspecialchars($userRow['username'] ?? '');
+    $title = $username ? 'title="用户名：' . $username . '"' : '';
+    $html = '<span style="color:' . $color . ';font-weight:700;cursor:default;" ' . $title . '>' . htmlspecialchars($displayName) . '</span>';
+    $tag = htmlspecialchars(!empty($userRow['luogu_hook']) ? $userRow['luogu_hook'] : ($userRow['tag'] ?? ''));
+    if ($tag !== '') {
+        $html .= ' <span class="custom-tag" style="color:' . $color . ';font-weight:700;">' . $tag . '</span>';
+    }
+    if ($profileUrl) {
+        $html = '<a href="' . $profileUrl . '" class="user-link" style="text-decoration:none;" ' . $title . '>' . $html . '</a>';
+    }
+    return $html;
+}
+// 用户状态
+function isLoggedIn() {
+    return isset($_SESSION['user_id']);
+}
+function getUserById($user_id) {
+    $cacheKey = 'user_' . (int)$user_id;
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    $stmt = $db->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return cacheSet($cacheKey, $stmt->fetch(PDO::FETCH_ASSOC) ?: []);
+}
+function clearUserCache($user_id) {
+    cacheClear('user_' . (int)$user_id);
+}
+function getCurrentUser() {
+    if (!isLoggedIn()) return null;
+    return getUserById($_SESSION['user_id']) ?: null;
+}
+function getUserRole($user_id) {
+    $user = getUserById($user_id);
+    return $user['role'] ?? '普通用户';
+}
+// 注：isAdmin / isStationAdmin / canEditTag / canDeleteContent / canManageContent
+// 五级管理员判定函数已迁移至 admin_roles.php（基于 L0-L5 等级比较）
+
+// 封禁过期自动检查：禁言 / 禁私信 / 禁专栏 / 账号封禁
+function checkAndClearExpiredBans($user_id) {
+    $db = getDB();
+    $user = getUserById($user_id);
+    if (!$user) return;
+    $now = date('Y-m-d H:i:s');
+    if ($user['banned'] && !empty($user['ban_expires_at']) && $user['ban_expires_at'] <= $now) {
+        $db->prepare("UPDATE users SET banned = 0, ban_expires_at = NULL WHERE id = ?")->execute([$user_id]);
+        clearUserCache($user_id);
+    }
+    if ($user['muted'] && !empty($user['mute_expires_at']) && $user['mute_expires_at'] <= $now) {
+        $db->prepare("UPDATE users SET muted = 0, mute_expires_at = NULL WHERE id = ?")->execute([$user_id]);
+        clearUserCache($user_id);
+    }
+    if ($user['private_banned'] && !empty($user['private_ban_expires_at']) && $user['private_ban_expires_at'] <= $now) {
+        $db->prepare("UPDATE users SET private_banned = 0, private_ban_expires_at = NULL WHERE id = ?")->execute([$user_id]);
+        clearUserCache($user_id);
+    }
+    if (isset($user['article_banned']) && $user['article_banned'] && !empty($user['article_ban_expires_at']) && $user['article_ban_expires_at'] <= $now) {
+        $db->prepare("UPDATE users SET article_banned = 0, article_ban_expires_at = NULL WHERE id = ?")->execute([$user_id]);
+        clearUserCache($user_id);
+    }
+}
+
+function isBanned($user_id) {
+    checkAndClearExpiredBans($user_id);
+    $user = getUserById($user_id);
+    return !empty($user['banned']);
+}
+function isMuted($user_id) {
+    checkAndClearExpiredBans($user_id);
+    $user = getUserById($user_id);
+    return !empty($user['muted']);
+}
+function isPrivateBanned($user_id) {
+    checkAndClearExpiredBans($user_id);
+    $user = getUserById($user_id);
+    return !empty($user['private_banned']);
+}
+function isArticleBanned($user_id) {
+    checkAndClearExpiredBans($user_id);
+    $user = getUserById($user_id);
+    return !empty($user['article_banned']);
+}
+// 签到
+function getUserCheckinStatus($user_id) {
+    $db = getDB();
+    $today = date('Y-m-d');
+    $stmt = $db->prepare("SELECT * FROM checkin_records WHERE user_id = ? AND checkin_date = ?");
+    $stmt->execute([$user_id, $today]);
+    $todayRecord = $stmt->fetch(PDO::FETCH_ASSOC);
+    $lastStmt = $db->prepare("SELECT streak, total_days, checkin_date FROM checkin_records WHERE user_id = ? ORDER BY checkin_date DESC LIMIT 1");
+    $lastStmt->execute([$user_id]);
+    $lastRecord = $lastStmt->fetch(PDO::FETCH_ASSOC);
+    return [
+        'checked_today' => !empty($todayRecord),
+        'streak' => $lastRecord ? (int)$lastRecord['streak'] : 0,
+        'total_days' => $lastRecord ? (int)$lastRecord['total_days'] : 0,
+        'last_date' => $lastRecord ? $lastRecord['checkin_date'] : null,
+    ];
+}
+function doCheckin($user_id) {
+    $db = getDB();
+    $today = date('Y-m-d');
+    $status = getUserCheckinStatus($user_id);
+    if ($status['checked_today']) {
+        return ['success' => false, 'message' => '今日已签到'];
+    }
+    $streak = $status['streak'];
+    $total = $status['total_days'];
+    if ($status['last_date']) {
+        $lastDate = $status['last_date'];
+        $yesterday = date('Y-m-d', strtotime('-1 day'));
+        if ($lastDate !== $yesterday && $lastDate !== $today) {
+            // 断签：扣双倍
+            $penalty = $streak * 2;
+            $total = max(0, $total - $penalty);
+            $streak = 0;
+        }
+    }
+    $streak++;
+    $total++;
+    $db->prepare("INSERT INTO checkin_records (user_id, checkin_date, streak, total_days) VALUES (?, ?, ?, ?)")->execute([$user_id, $today, $streak, $total]);
+    return ['success' => true, 'streak' => $streak, 'total_days' => $total];
+}
+// 一言
+function getHitokoto() {
+    static $list = null;
+    if ($list === null) {
+        $dataFile = __DIR__ . '/hitokoto_data.php';
+        if (is_file($dataFile)) {
+            $loaded = @include $dataFile;
+            if (is_array($loaded) && count($loaded) > 0) {
+                $list = $loaded;
+            }
+        }
+        if (!is_array($list) || count($list) === 0) {
+            $list = [
+                ['text' => '愿你有一天能和你重要的人重逢。', 'author' => '《千与千寻》'],
+                ['text' => '不要低头，皇冠会掉。', 'author' => ''],
+                ['text' => '与其担心未来，不如现在好好努力。', 'author' => ''],
+                ['text' => '逆风的方向，更适合飞翔。', 'author' => ''],
+                ['text' => '星光不问赶路人，时光不负有心人。', 'author' => ''],
+                ['text' => '生活明朗，万物可爱。', 'author' => ''],
+                ['text' => '前路浩浩荡荡，万事尽可期待。', 'author' => ''],
+                ['text' => '保持热爱，奔赴山海。', 'author' => ''],
+                ['text' => '万物皆有裂痕，那是光照进来的地方。', 'author' => '莱昂纳德·科恩'],
+                ['text' => '你如今的气质里，藏着你读过的书和爱过的人。', 'author' => ''],
+                ['text' => '人生没有白走的路，每一步都算数。', 'author' => ''],
+                ['text' => '世上无难事，只要肯放弃。', 'author' => ''],
+                ['text' => '有些事不是看到了希望才去坚持，而是坚持了才看到希望。', 'author' => ''],
+                ['text' => '没有伞的孩子必须努力奔跑。', 'author' => ''],
+                ['text' => '我们都在阴沟里，但仍有人仰望星空。', 'author' => '王尔德'],
+                ['text' => '如果你不出去走走，你会以为这就是世界。', 'author' => ''],
+                ['text' => '种一棵树最好的时间是十年前，其次是现在。', 'author' => ''],
+                ['text' => '不是所有的鱼都会生活在同一片海里。', 'author' => '村上春树'],
+                ['text' => '一切都好，不说也罢。', 'author' => ''],
+                ['text' => '愿你历千帆，归来仍少年。', 'author' => ''],
+                ['text' => '代码是写给人看的，只是顺便能在机器上运行。', 'author' => '《计算机程序的构造和解释》'],
+                ['text' => '简单是可靠的前提。', 'author' => 'Edsger W. Dijkstra'],
+                ['text' => '过早优化是万恶之源。', 'author' => 'Donald Knuth'],
+                ['text' => 'Talk is cheap, show me the code.', 'author' => 'Linus Torvalds'],
+                ['text' => '程序员的浪漫是用代码改变世界。', 'author' => ''],
+            ];
+        }
+    }
+    return $list[array_rand($list)];
+}
+// 今日运势
+function getDailyFortune($user_id, $date) {
+    $seed = crc32($user_id . $date);
+    mt_srand($seed);
+    $yi = ['写代码', '做题', '摸鱼', '重构', '写博客', '帮助他人', '学习新技能', '整理笔记', '调试程序', '优化性能'];
+    $ji = ['熬夜', '删库', '和人对线', '拖延', '吃外卖', '裸考', '随意重构', '盲目自信', '跳过测试', '不经思考提交'];
+    return [
+        'yi' => $yi[mt_rand(0, count($yi) - 1)],
+        'ji' => $ji[mt_rand(0, count($ji) - 1)],
+    ];
+}
+// 忘记密码验证码
+function generateResetCode() {
+    $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    $_SESSION['reset_code'] = $code;
+    $_SESSION['reset_code_time'] = time();
+    $_SESSION['reset_username'] = '';
+    return $code;
+}
+// 颜色与徽章：五级管理员颜色映射（统一紫色名，仅深浅区分等级）
+function getColorByRole($role) {
+    $map = [
+        '站长'     => '#6d28d9',
+        '副站长'   => '#7c3aed',
+        '大管理'   => '#8b5cf6',
+        '社区管理' => '#9333ea',
+        '专栏管理' => '#a855f7',
+        '普通用户' => '#808080',
+    ];
+    return $map[$role] ?? '#808080';
+}
+// 用户显示颜色：管理员按级别配色；普通用户优先使用同步的洛谷颜色
+function getUserDisplayColor($userRow) {
+    if (empty($userRow)) return '#808080';
+    $role = $userRow['role'] ?? '';
+    if (roleLevel($role) >= 1) {
+        return getColorByRole($role);
+    }
+    if (!empty($userRow['luogu_color'])) {
+        $lc = strtolower(trim($userRow['luogu_color']));
+        if ($lc === 'gray' || $lc === 'grey' || $lc === '#808080' || $lc === '#a0a0a0' || $lc === '#999') {
+            return '#808080';
+        }
+        return htmlspecialchars($userRow['luogu_color']);
+    }
+    return '#808080';
+}
+function getRoleBadge($role) {
+    $map = [
+        '站长'     => ['label' => '站长',     'color' => '#6d28d9'],
+        '副站长'   => ['label' => '副站长',   'color' => '#7c3aed'],
+        '大管理'   => ['label' => '大管理',   'color' => '#8b5cf6'],
+        '社区管理' => ['label' => '社区管理', 'color' => '#9333ea'],
+        '专栏管理' => ['label' => '专栏管理', 'color' => '#a855f7'],
+    ];
+    return $map[$role] ?? null;
+}
+// Markdown / LaTeX 渲染（占位符保护代码块、行内代码、公式免被转义/格式化）
+function renderMarkdown($text) {
+    if (trim($text) === '') return '';
+
+    // 请求级缓存：相同内容按 hash 缓存渲染结果
+    $mdCacheKey = 'md_' . md5($text);
+    $cached = cacheGet($mdCacheKey);
+    if ($cached !== null) return $cached;
+
+    $text = str_replace(["\r\n", "\r"], "\n", $text);
+    // 统一去除行尾空白（保留硬换行的两个空格会在下面单独处理）
+    // 修复：原代码未处理 \t，导致 tab 缩进列表识别失败
+    $text = preg_replace('/\t/', '    ', $text);
+
+    $placeholders = [];
+    $placeholderIndex = 0;
+    $addPlaceholder = function ($html) use (&$placeholders, &$placeholderIndex) {
+        $key = '<!--MDPLACE' . ($placeholderIndex++) . '-->';
+        $placeholders[$key] = $html;
+        return $key;
+    };
+
+    // 1. 保护代码块 ```lang\ncode\n```
+    //    必须先于行内代码处理（否则 ``` 会被当作三个反引号行内代码）
+    //    修复：严格匹配 ``` 开头，结尾的 ``` 必须在行首或行尾（前面不能跟其他字符）
+    $text = preg_replace_callback('/```([a-zA-Z0-9_+-]*)[ \t]*\n(.*?)```(?:[ \t]*\n|$)/s', function ($m) use ($addPlaceholder) {
+        $lang = trim($m[1] ?? '');
+        $code = $m[2];
+        // 去除代码块尾部多余空行
+        $code = preg_replace('/\n+$/', '', $code);
+        $code = preg_replace('/^\n+/', '', $code);
+        $langEsc = htmlspecialchars($lang, ENT_QUOTES, 'UTF-8');
+        $cls = $lang ? 'language-' . $lang : '';
+        $codeEsc = htmlspecialchars($code, ENT_QUOTES, 'UTF-8');
+        $lineCount = substr_count($codeEsc, "\n") + 1;
+        $lineNumbers = implode("\n", range(1, $lineCount));
+        return $addPlaceholder('<pre class="code-block"><span class="code-line-numbers">' . $lineNumbers . '</span><code class="' . $cls . '">' . $codeEsc . '</code></pre>');
+    }, $text);
+
+    // 2. 保护行内代码 `code`（支持 ``code with ` inside``）
+    //    修复：双反引号优先（允许内部含单反引号），单反引号兜底
+    //    双反引号 ``...`` — 内容可含单反引号 `（但不含双反引号 ``）
+    $text = preg_replace_callback('/``((?:[^`]|`[^`])+)``/s', function ($m) use ($addPlaceholder) {
+        $code = $m[1];
+        if (strlen($code) > 2 && $code[0] === ' ' && $code[strlen($code)-1] === ' ') {
+            $code = substr($code, 1, -1);
+        }
+        return $addPlaceholder('<code>' . htmlspecialchars($code, ENT_QUOTES, 'UTF-8') . '</code>');
+    }, $text);
+    // 兜底：单反引号行内代码 `code`（最常见的场景）
+    $text = preg_replace_callback('/`([^`\n]+)`/', function ($m) use ($addPlaceholder) {
+        return $addPlaceholder('<code>' . htmlspecialchars($m[1], ENT_QUOTES, 'UTF-8') . '</code>');
+    }, $text);
+
+    // 3. 保护行间公式 $$...$$
+    //    修复：旧正则非贪婪 `.+?` 在嵌套公式时会过早结束；改用更宽容的匹配
+    $text = preg_replace_callback('/\$\$([\s\S]+?)\$\$(?!\$)/', function ($m) use ($addPlaceholder) {
+        $inner = $m[1];
+        // 不做 htmlspecialchars：KaTeX 自己会转义；保留原始公式字符
+        return $addPlaceholder('<span class="math-display">$$' . $inner . '$$</span>');
+    }, $text);
+
+    // 4. 保护行内公式 $...$
+    //    修复：旧正则要求 `[a-zA-Z\\\\=+\-^_]` 才视为公式，导致 \frac、\sum 等开头公式被吞；
+    //          新规则：包含反斜杠命令、或含数字+运算符、或含下标上标 _ ^
+    $text = preg_replace_callback('/(?<![\\$a-zA-Z0-9])\$([^$\n]+?)\$(?!\d)/', function ($m) use ($addPlaceholder) {
+        $inner = $m[1];
+        // 排除纯数字/纯价格（如 $5、$1.99）
+        if (preg_match('/^\s*\d+(?:\.\d+)?\s*$/', $inner)) return '$' . $inner . '$';
+        // 必须含 LaTeX 命令、运算符、上下标、希腊字母关键字等
+        if (!preg_match('/[\\\\=+\-^_{}]|\\b(frac|sum|sqrt|int|alpha|beta|gamma|delta|pi|theta|infty|le|ge|ne|cdot|times|div|pm|mp|forall|exists|in|notin|subset|supset|cup|cap)\\b/', $inner)) {
+            return '$' . $inner . '$';
+        }
+        return $addPlaceholder('<span class="math-inline">$' . $inner . '$</span>');
+    }, $text);
+
+    // 转义剩余 HTML（再还原占位符标记，避免后续替换失败）
+    $text = htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+    $text = preg_replace_callback('/&lt;!--MDPLACE(\d+)--&gt;/', function ($m) {
+        return '<!--MDPLACE' . $m[1] . '-->';
+    }, $text);
+
+    // 5. 处理引用块嵌套（>> 表示二级引用）
+    //    修复：旧逻辑只支持单层引用，多层 > 嵌套会被当成单层
+    $lines = explode("\n", $text);
+    $out = [];
+    $n = count($lines);
+    $i = 0;
+
+    // 递归渲染块级内容（用于引用块/列表项内的多行内容）
+    $renderBlockRecursive = function ($blockText) {
+        if (trim($blockText) === '') return '';
+        return renderMarkdown($blockText);
+    };
+
+    while ($i < $n) {
+        $line = $lines[$i];
+        $trimmed = trim($line);
+        if ($trimmed === '') { $i++; continue; }
+
+        // 占位符单独成块
+        if (preg_match('/^<!--MDPLACE\d+-->$/', $trimmed)) {
+            $out[] = $trimmed;
+            $i++;
+            continue;
+        }
+
+        // 标题（修复：严格要求 # 后有空格，避免 #hashtag 被误识别）
+        if (preg_match('/^(#{1,6})\s+(.+)$/', $line, $mh)) {
+            $level = strlen($mh[1]);
+            $out[] = "<h{$level}>" . renderMarkdownInline(trim($mh[2])) . "</h{$level}>";
+            $i++;
+            continue;
+        }
+
+        // 分隔线（修复：要求整行只有 - _ * 且至少 3 个）
+        if (preg_match('/^\s*([-*_])\1{2,}\s*$/', $line)) {
+            $out[] = '<hr>';
+            $i++;
+            continue;
+        }
+
+        // 引用块（支持嵌套：递归调用 renderMarkdown 处理内部内容）
+        // 修复：旧版把所有 > 行合并后只走 inline 渲染，导致引用内的列表/代码块/标题失效
+        if (preg_match('/^\s*(?:>|&gt;)\s?/', $line)) {
+            $quoteLines = [];
+            while ($i < $n && preg_match('/^\s*(?:>|&gt;)\s?(.*)$/', $lines[$i], $qm)) {
+                $quoteLines[] = $qm[1];
+                $i++;
+            }
+            // 递归渲染引用块内容（支持嵌套引用、列表、代码块等）
+            $innerHtml = $renderBlockRecursive(implode("\n", $quoteLines));
+            $out[] = '<blockquote>' . $innerHtml . '</blockquote>';
+            continue;
+        }
+
+        // 无序列表（支持嵌套：通过缩进判断子项）
+        // 修复：旧版忽略缩进，所有同级；新版按缩进递归渲染子列表
+        if (preg_match('/^\s*[-*+]\s+(.+)$/', $line)) {
+            $listHtml = renderListBlock($lines, $i, 'ul', $renderBlockRecursive);
+            $out[] = $listHtml['html'];
+            $i = $listHtml['next'];
+            continue;
+        }
+
+        // 有序列表
+        if (preg_match('/^\s*\d+\.\s+(.+)$/', $line)) {
+            $listHtml = renderListBlock($lines, $i, 'ol', $renderBlockRecursive);
+            $out[] = $listHtml['html'];
+            $i = $listHtml['next'];
+            continue;
+        }
+
+        // 表格
+        if (isTableBlock($lines, $i)) {
+            $tableHtml = parseTableBlock($lines, $i);
+            if ($tableHtml !== null) {
+                $out[] = $tableHtml;
+                continue;
+            }
+        }
+
+        // 普通段落（修复：段落内若含占位符行，不应中断段落）
+        $paraLines = [];
+        while ($i < $n) {
+            $pl = $lines[$i];
+            if (trim($pl) === '') break;
+            if (preg_match('/^#{1,6}\s+/', $pl)) break;
+            if (preg_match('/^\s*([-*_])\1{2,}\s*$/', $pl)) break;
+            if (preg_match('/^\s*(?:>|&gt;)\s?/', $pl)) break;
+            if (preg_match('/^\s*[-*+]\s+/', $pl)) break;
+            if (preg_match('/^\s*\d+\.\s+/', $pl)) break;
+            if (preg_match('/^<!--MDPLACE\d+-->$/', trim($pl))) break;
+            if (isTableBlock($lines, $i)) break;
+            $paraLines[] = $pl;
+            $i++;
+        }
+        // 行尾两个空格 = 硬换行：在该行末尾插入硬换行标记
+        // 修复：每行末尾 2 空格 → 该行后强制换行；普通换行（无 2 空格）按 markdown 规范应合并为空格
+        $renderedLines = [];
+        foreach ($paraLines as $ln) {
+            $hasHardBreak = preg_match('/  $/', $ln);
+            $cleanLine = rtrim($ln);
+            $renderedLines[] = ['text' => $cleanLine, 'hardBreak' => $hasHardBreak];
+        }
+        // 渲染每行 inline，按硬换行标记决定连接方式
+        $parts = [];
+        foreach ($renderedLines as $idx => $rl) {
+            $parts[] = renderMarkdownInline($rl['text']);
+            // 如果不是最后一行：硬换行用 <br>，软换行用空格
+            if ($idx < count($renderedLines) - 1) {
+                $parts[] = $rl['hardBreak'] ? '<br>' : ' ';
+            } elseif ($rl['hardBreak']) {
+                $parts[] = '<br>'; // 段落最后一行末尾的硬换行
+            }
+        }
+        $out[] = '<p>' . implode('', $parts) . '</p>';
+    }
+
+    $html = implode("\n", $out);
+    // 还原占位符
+    foreach (array_reverse($placeholders) as $key => $value) {
+        $html = str_replace($key, $value, $html);
+    }
+    return cacheSet($mdCacheKey, $html);
+}
+
+// 渲染列表块（支持嵌套子列表）
+// 返回 ['html' => string, 'next' => int]
+function renderListBlock(array $lines, int $start, string $listType, callable $renderBlockRecursive): array {
+    $n = count($lines);
+    $i = $start;
+    // 获取起始行的缩进作为基准
+    $baseIndent = 0;
+    if (preg_match('/^(\s*)/', $lines[$i], $im)) {
+        $baseIndent = strlen($im[1]);
+    }
+    $markerRegex = ($listType === 'ul') ? '/^(\s*)([-*+])\s+(.+)$/' : '/^(\s*)(\d+)\.\s+(.+)$/';
+
+    $html = '<' . $listType . '>';
+    while ($i < $n) {
+        $line = $lines[$i];
+        if (trim($line) === '') {
+            // 空行：检查下一行是否仍是同级别列表项；否则结束
+            if ($i + 1 < $n && preg_match($markerRegex, $lines[$i+1], $nextM) && strlen($nextM[1]) === $baseIndent) {
+                $i++;
+                continue;
+            }
+            break;
+        }
+        if (!preg_match($markerRegex, $line, $m)) break;
+        $indent = strlen($m[1]);
+        if ($indent < $baseIndent) break;
+        if ($indent > $baseIndent) {
+            // 子列表：递归渲染
+            $sub = renderListBlock($lines, $i, $listType, $renderBlockRecursive);
+            // 子列表附加到上一个 <li> 内
+            if (!empty($html) && substr($html, -5) === '</li>') {
+                $html = substr($html, 0, -5) . $sub['html'] . '</li>';
+            } else {
+                $html .= '<li>' . $sub['html'] . '</li>';
+            }
+            $i = $sub['next'];
+            continue;
+        }
+        // 同级列表项
+        $content = $m[3];
+        // 收集列表项的续行（缩进大于基准的行，直到下一个同级标记或空行）
+        $itemLines = [$content];
+        $i++;
+        while ($i < $n) {
+            $nextLine = $lines[$i];
+            if (trim($nextLine) === '') {
+                // 空行后若仍是列表项则保留，否则结束续行
+                if ($i + 1 < $n && preg_match($markerRegex, $lines[$i+1], $nextM2) && strlen($nextM2[1]) >= $baseIndent) {
+                    $itemLines[] = '';
+                    $i++;
+                    continue;
+                }
+                break;
+            }
+            if (preg_match($markerRegex, $nextLine, $nm) && strlen($nm[1]) === $baseIndent) break;
+            if (preg_match($markerRegex, $nextLine, $nm) && strlen($nm[1]) < $baseIndent) break;
+            // 续行：加到当前项
+            $itemLines[] = trim($nextLine);
+            $i++;
+        }
+        $itemContent = implode("\n", $itemLines);
+        // 若续行多于 1 行或含块级语法，递归渲染；否则仅 inline
+        if (substr_count($itemContent, "\n") > 0 || preg_match('/^(\s*)([-*+]\s+|\d+\.\s+|>|&gt;|#{1,6}\s)/m', $itemContent)) {
+            $itemHtml = $renderBlockRecursive($itemContent);
+        } else {
+            $itemHtml = renderMarkdownInline($itemContent);
+        }
+        $html .= '<li>' . $itemHtml . '</li>';
+    }
+    $html .= '</' . $listType . '>';
+    return ['html' => $html, 'next' => $i];
+}
+
+// @username 渲染为带颜色的昵称链接 + Tag（仿洛谷 @ 渲染）
+function renderMentionLink(string $rawName): string {
+    $cacheKey = 'mention_' . $rawName;
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+
+    $user = getUserByName($rawName);
+    if (!$user) {
+        return cacheSet($cacheKey, '@' . htmlspecialchars($rawName));
+    }
+    $fullUser = getUserById((int)$user['id']);
+    if (!$fullUser) {
+        return cacheSet($cacheKey, '@' . htmlspecialchars($rawName));
+    }
+
+    $uid = (int)$fullUser['id'];
+    $profileUrl = '/user/' . $uid;
+
+    if (!empty($fullUser['banned'])) {
+        $html = '<a href="' . $profileUrl . '" class="mention-link mention-banned" style="color:var(--danger);font-weight:700;text-decoration:none;">@封禁用户</a>';
+        return cacheSet($cacheKey, $html);
+    }
+
+    $color = getUserDisplayColor($fullUser);
+    $displayName = !empty($fullUser['nickname']) ? $fullUser['nickname'] : ($fullUser['username'] ?? $rawName);
+    $tag = !empty($fullUser['luogu_hook']) ? $fullUser['luogu_hook'] : ($fullUser['tag'] ?? '');
+
+    $html = '<a href="' . $profileUrl . '" class="mention-link" style="color:' . $color . ';font-weight:700;text-decoration:none;">@' . htmlspecialchars($displayName) . '</a>';
+    if ($tag !== '') {
+        $html .= ' <span class="custom-tag" style="color:' . $color . ';">' . htmlspecialchars($tag) . '</span>';
+    }
+    return cacheSet($cacheKey, $html);
+}
+
+function renderMarkdownInline($text) {
+    // 修复：图片必须在链接之前处理（否则 ![alt](url) 会被链接规则吞掉）
+    // 图片 ![alt](url)
+    $text = preg_replace_callback('/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/', function ($m) {
+        $alt = htmlspecialchars($m[1], ENT_QUOTES, 'UTF-8');
+        $url = htmlspecialchars(assetUrl($m[2]), ENT_QUOTES, 'UTF-8');
+        return '<img src="' . $url . '" alt="' . $alt . '" style="max-width:100%;border-radius:8px;" loading="lazy">';
+    }, $text);
+    // 链接 [text](url) — 支持 title
+    $text = preg_replace_callback('/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/', function ($m) {
+        $title = renderMarkdownInline($m[1]);
+        $url = htmlspecialchars(assetUrl($m[2]), ENT_QUOTES, 'UTF-8');
+        return '<a href="' . $url . '" target="_blank" rel="noopener noreferrer">' . $title . '</a>';
+    }, $text);
+
+    // 自动链接裸 URL（修复：排除已被 <a href="..."> 包裹的 URL，避免双重嵌套）
+    $text = preg_replace_callback('/(?<!["\'>=])((?:https?:\/\/|www\.)[^\s<>\)\]]+)/', function ($m) {
+        $url = $m[1];
+        $href = (strpos($url, 'http://') !== 0 && strpos($url, 'https://') !== 0) ? 'https://' . $url : $url;
+        $urlEsc = htmlspecialchars($url, ENT_QUOTES, 'UTF-8');
+        $hrefEsc = htmlspecialchars($href, ENT_QUOTES, 'UTF-8');
+        return '<a href="' . $hrefEsc . '" target="_blank" rel="noopener noreferrer">' . $urlEsc . '</a>';
+    }, $text);
+
+    // @提及：先抽取为占位符，避免被后续加粗/斜体干扰
+    // 仅在 @ 前非字母/数字/下划线/中文/@ 时匹配（排除邮箱 user@host）
+    $mentionMap = [];
+    $text = preg_replace_callback('/(?<![a-zA-Z0-9_\x{4e00}-\x{9fa5}@])@([a-zA-Z0-9_\x{4e00}-\x{9fa5}]{1,50})/u', function ($m) use (&$mentionMap) {
+        $key = "\x00MENTION" . count($mentionMap) . "\x00";
+        $mentionMap[$key] = $m[1];
+        return $key;
+    }, $text);
+
+    // 修复：删除线优先于粗体/斜体（避免 ~~**text**~~ 解析错乱）
+    $text = preg_replace('/~~(?!\s)(.+?)(?<!\s)~~/s', '<del>$1</del>', $text);
+    // 修复：粗体必须先于斜体（否则 **text** 会被斜体规则部分吞掉）
+    $text = preg_replace('/\*\*(?!\s)(.+?)(?<!\s)\*\*/s', '<strong>$1</strong>', $text);
+    $text = preg_replace('/__(?!\s)(.+?)(?<!\s)__/s', '<strong>$1</strong>', $text);
+    // 斜体：单 * 或单 _
+    // 修复：_ 不能紧跟字母/数字（避免 target="_blank" 中的 _b 被吞），且不能在标识符中间
+    // 修复：使用 word boundary 排除 _ 在 identifier 中间的情况
+    $text = preg_replace('/(?<!\*)\*(?!\s)([^*]+?)(?<!\s)\*(?!\*)/s', '<em>$1</em>', $text);
+    // _ 斜体：只在 _ 前后都不是单词字符时才生效（避免 snake_case_var 被破坏）
+    $text = preg_replace('/(?<![a-zA-Z0-9_])_(?!\s)([^_]+?)(?<!\s)_(?![a-zA-Z0-9_])/s', '<em>$1</em>', $text);
+
+    // 还原 @提及 为彩色链接
+    if (!empty($mentionMap)) {
+        foreach ($mentionMap as $key => $username) {
+            $text = str_replace($key, renderMentionLink($username), $text);
+        }
+    }
+
+    return $text;
+}
+
+function isTableBlock(array $lines, int $i): bool {
+    if (!isset($lines[$i], $lines[$i + 1])) return false;
+    $first = trim($lines[$i]);
+    $second = trim($lines[$i + 1]);
+    if ($first === '' || $first[0] !== '|') return false;
+    if (!preg_match('/^\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/', $second)) return false;
+    return true;
+}
+
+function parseTableBlock(array &$lines, int &$i): ?string {
+    $headerLine = trim($lines[$i]);
+    $sepLine = trim($lines[$i + 1]);
+    $i += 2;
+    $headers = array_map('trim', explode('|', trim($headerLine, '|')));
+    $aligns = [];
+    foreach (array_map('trim', explode('|', trim($sepLine, '|'))) as $col) {
+        if (preg_match('/^:-+:$/', $col)) $aligns[] = 'center';
+        elseif (preg_match('/^-+:$/', $col)) $aligns[] = 'right';
+        else $aligns[] = 'left';
+    }
+    $html = '<table class="md-table"><thead><tr>';
+    foreach ($headers as $idx => $h) {
+        $align = $aligns[$idx] ?? 'left';
+        $html .= '<th style="text-align:' . $align . '">' . renderMarkdownInline($h) . '</th>';
+    }
+    $html .= '</tr></thead><tbody>';
+    while ($i < count($lines)) {
+        $line = trim($lines[$i]);
+        if ($line === '') break;
+        if ($line[0] !== '|') break;
+        $cells = array_map('trim', explode('|', trim($line, '|')));
+        $html .= '<tr>';
+        foreach ($headers as $idx => $_) {
+            $cell = $cells[$idx] ?? '';
+            $align = $aligns[$idx] ?? 'left';
+            $html .= '<td style="text-align:' . $align . '">' . renderMarkdownInline($cell) . '</td>';
+        }
+        $html .= '</tr>';
+        $i++;
+    }
+    $html .= '</tbody></table>';
+    return $html;
+}
+// 操作日志：记录全站写操作的操作人、IP、目标、状态等
+// $action 操作类型（如 login/create_post/send_message）
+// $targetType 目标对象类型（如 user/post/message/problem）
+// $targetId 目标对象 ID（字符串以兼容非数字 ID）
+// $detail 详情（数组或字符串），$status success/failed
+function logOperation(string $action, string $targetType = '', $targetId = '', $detail = null, string $status = 'success'): void
+{
+    try {
+        $db = getDB();
+        $user = getCurrentUser();
+        $userId = $user['id'] ?? null;
+        $username = $user['username'] ?? '';
+        $ip = getUserIP();
+        $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 500);
+        $detailJson = is_array($detail) ? json_encode($detail, JSON_UNESCAPED_UNICODE) : (string)$detail;
+        if (mb_strlen($detailJson, 'UTF-8') > 65000) {
+            $detailJson = mb_substr($detailJson, 0, 65000, 'UTF-8');
+        }
+        $db->prepare('INSERT INTO operation_log (user_id, username, ip, action, target_type, target_id, detail, status, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())')
+            ->execute([$userId, $username, $ip, $action, $targetType, (string)$targetId, $detailJson, $status, $ua]);
+    } catch (Throwable $e) {
+        error_log('[logOperation] failed: ' . $e->getMessage());
+    }
+}
+// 清理超过指定天数的操作日志（由 cron 调用）
+function purgeOldOperationLogs(int $days = 90): int
+{
+    try {
+        $db = getDB();
+        $stmt = $db->prepare("DELETE FROM operation_log WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)");
+        $stmt->bindValue(1, $days, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->rowCount();
+    } catch (Throwable $e) {
+        error_log('[purgeOldOperationLogs] failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+// 通知系统
+function addNotification($user_id, $type, $content, $link = null, $source = null) {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("INSERT INTO notifications (user_id, type, content, link, source) VALUES (?, ?, ?, ?, ?)");
+        $stmt->execute([$user_id, $type, $content, $link, $source]);
+        cacheClear('unread_notif_' . (int)$user_id);
+    } catch (PDOException $e) {
+        error_log('[addNotification] failed: ' . $e->getMessage());
+    }
+}
+// 通知 @提及：一次性查全部用户 + 一条多值 INSERT，避免 N+1
+function notifyMentions($content, $sourceType, $sourceId, $senderId, $link = '') {
+    preg_match_all('/(?<![a-zA-Z0-9_\x{4e00}-\x{9fa5}@])@([a-zA-Z0-9_\x{4e00}-\x{9fa5}]{1,50})/u', $content, $matches);
+    if (empty($matches[1])) return;
+
+    $names = array_values(array_unique($matches[1]));
+    if (empty($names)) return;
+
+    $db = getDB();
+    try {
+        $placeholders = implode(',', array_fill(0, count($names), '?'));
+        $stmt = $db->prepare("SELECT DISTINCT id FROM users WHERE (username IN ($placeholders) OR nickname IN ($placeholders)) AND id != ?");
+        $params = array_merge($names, $names, [$senderId]);
+        $stmt->execute($params);
+        $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (empty($users)) return;
+
+        $notifiedIds = [];
+        foreach ($users as $u) {
+            $notifiedIds[(int)$u['id']] = true;
+        }
+        if (empty($notifiedIds)) return;
+
+        $rows = [];
+        $params = [];
+        foreach ($notifiedIds as $uid => $_) {
+            $rows[] = '(?, ?, ?, ?, ?)';
+            $params[] = $uid;
+            $params[] = 'mention';
+            $params[] = '您被 @ 提及';
+            $params[] = $link;
+            $params[] = $sourceType;
+        }
+        $sql = 'INSERT INTO notifications (user_id, type, content, link, source) VALUES ' . implode(', ', $rows);
+        $db->prepare($sql)->execute($params);
+
+        foreach ($notifiedIds as $uid => $_) {
+            cacheClear('unread_notif_' . $uid);
+        }
+    } catch (PDOException $e) {
+        error_log('[notifyMentions] failed: ' . $e->getMessage());
+    }
+}
+function getUnreadCount($user_id) {
+    $user_id = (int)$user_id;
+    $ck = 'unread_notif_' . $user_id;
+    $v = cacheGet($ck);
+    if ($v !== null) return (int)$v;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0");
+        $stmt->execute([$user_id]);
+        $cnt = (int)$stmt->fetchColumn();
+        cacheSet($ck, $cnt, 15);
+        return $cnt;
+    } catch (PDOException $e) {
+        error_log('[getUnreadCount] failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+function getUnreadMessageCount($user_id) {
+    $user_id = (int)$user_id;
+    $ck = 'unread_msg_' . $user_id;
+    $v = cacheGet($ck);
+    if ($v !== null) return (int)$v;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT COUNT(*) FROM private_messages WHERE receiver_id = ? AND is_read = 0");
+        $stmt->execute([$user_id]);
+        $cnt = (int)$stmt->fetchColumn();
+        cacheSet($ck, $cnt, 15);
+        return $cnt;
+    } catch (PDOException $e) {
+        error_log('[getUnreadMessageCount] failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+function getNotifications($user_id, $limit = 20) {
+    $db = getDB();
+    try {
+        $updateStmt = $db->prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0");
+        $updateStmt->bindValue(1, $user_id, PDO::PARAM_INT);
+        $updateStmt->execute();
+        $stmt = $db->prepare("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ?");
+        $stmt->bindValue(1, $user_id, PDO::PARAM_INT);
+        $stmt->bindValue(2, $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log('[getNotifications] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+function markNotificationRead($notif_id, $user_id) {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?");
+        $stmt->execute([$notif_id, $user_id]);
+    } catch (PDOException $e) {
+        error_log('[markNotificationRead] failed: ' . $e->getMessage());
+    }
+}
+// 删除指定通知：失败时返回 false 让前端感知
+function deleteNotifications($user_id, array $ids) {
+    if (empty($ids)) return false;
+    $db = getDB();
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $params = array_merge([$user_id], $ids);
+    try {
+        $db->prepare("DELETE FROM notifications WHERE user_id = ? AND id IN ($ph)")->execute($params);
+        return true;
+    } catch (PDOException $e) {
+        error_log('[deleteNotifications] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+function clearAllNotifications($user_id) {
+    $db = getDB();
+    try {
+        $db->prepare("DELETE FROM notifications WHERE user_id = ?")->execute([$user_id]);
+    } catch (PDOException $e) {
+        error_log('[clearAllNotifications] failed: ' . $e->getMessage());
+    }
+}
+// IP 相关
+// 仅在可信代理（本机/内网/回环）时才采用 X-Forwarded-For / CF-Connecting-IP / X-Real-IP，
+// 否则用 REMOTE_ADDR，避免攻击者伪造头绕过封禁/限流。
+function getUserIP() {
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    $isTrustedProxy = false;
+    if ($remote && filter_var($remote, FILTER_VALIDATE_IP)) {
+        $isPrivate = !filter_var($remote, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        if ($isPrivate || $remote === '127.0.0.1' || $remote === '::1') {
+            $isTrustedProxy = true;
+        }
+    } elseif ($remote === '' && (PHP_SAPI === 'cli' || PHP_SAPI === 'cli-server')) {
+        $isTrustedProxy = true;
+    }
+    if ($isTrustedProxy) {
+        $candidates = [
+            $_SERVER['HTTP_CF_CONNECTING_IP'] ?? null,
+            $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+            $_SERVER['HTTP_X_REAL_IP'] ?? null,
+        ];
+        foreach ($candidates as $ip) {
+            if (empty($ip)) continue;
+            // X-Forwarded-For 可能为 "client, proxy1, proxy2"，取最左侧
+            if (strpos($ip, ',') !== false) {
+                $ip = trim(explode(',', $ip)[0]);
+            }
+            $ip = trim($ip);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                return $ip;
+            }
+        }
+    }
+    if ($remote && filter_var($remote, FILTER_VALIDATE_IP)) {
+        return $remote;
+    }
+    return '0.0.0.0';
+}
+function isIpBanned($ip) {
+    $cacheKey = 'ip_banned_' . $ip;
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+
+    $db = getDB();
+    // 顺带清理本次 IP 的过期封禁记录
+    try {
+        $db->prepare("DELETE FROM banned_ips WHERE ip = ? AND expires_at IS NOT NULL AND expires_at <= NOW()")->execute([$ip]);
+    } catch (PDOException $e) {
+        error_log('[isIpBanned] cleanup failed: ' . $e->getMessage());
+    }
+    try {
+        $stmt = $db->prepare("SELECT 1 FROM banned_ips WHERE ip = ? AND (expires_at IS NULL OR expires_at > NOW())");
+        $stmt->execute([$ip]);
+        return cacheSet($cacheKey, $stmt->fetchColumn() > 0);
+    } catch (PDOException $e) {
+        error_log('[isIpBanned] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+function addBannedIp($ip, $reason, $admin_id, $duration = null) {
+    cacheClear('ip_banned_' . $ip);
+    $db = getDB();
+    $expiresAt = null;
+    if ($duration !== null && $duration > 0) {
+        $expiresAt = date('Y-m-d H:i:s', time() + $duration);
+    }
+    $stmt = $db->prepare("INSERT INTO banned_ips (ip, reason, created_by, expires_at) VALUES (?, ?, ?, ?)
+                          ON DUPLICATE KEY UPDATE reason = VALUES(reason), created_by = VALUES(created_by), expires_at = VALUES(expires_at), created_at = CURRENT_TIMESTAMP");
+    return $stmt->execute([$ip, $reason, $admin_id, $expiresAt]);
+}
+function removeBannedIp($ip) {
+    cacheClear('ip_banned_' . $ip);
+    $db = getDB();
+    $stmt = $db->prepare("DELETE FROM banned_ips WHERE ip = ?");
+    return $stmt->execute([$ip]);
+}
+function getBannedIps() {
+    $db = getDB();
+    return $db->query("SELECT b.*, u.username as admin_name,
+                              CASE
+                                  WHEN b.expires_at IS NULL THEN 0
+                                  WHEN b.expires_at > NOW() THEN 1
+                                  ELSE 2
+                              END as ban_status
+                       FROM banned_ips b
+                       LEFT JOIN users u ON b.created_by = u.id
+                       ORDER BY ban_status ASC, b.created_at DESC LIMIT 500")->fetchAll(PDO::FETCH_ASSOC);
+}
+function isForumPostLocked($postId) {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT locked FROM forum_posts WHERE id = ?");
+        $stmt->execute([(int)$postId]);
+        return (bool)$stmt->fetchColumn();
+    } catch (PDOException $e) {
+        error_log('[isForumPostLocked] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+
+// canDeleteContent / canManageContent 已迁移至 admin_roles.php
+
+// HTTP GET 请求（cURL 优先，file_get_contents 回退）
+function httpGet($url, $headers = []) {
+    $defaultHeaders = [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language: zh-CN,zh;q=0.9',
+    ];
+    $headers = array_merge($defaultHeaders, $headers);
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init();
+        if ($ch !== false) {
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_TIMEOUT => 15,
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 5,
+                CURLOPT_ENCODING => '',
+                CURLOPT_HTTPHEADER => $headers,
+            ]);
+            $body = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($body !== false && $httpCode < 400) {
+                return $body;
+            }
+        }
+    }
+
+    $opts = [
+        'http' => [
+            'method' => 'GET',
+            'header' => implode("\r\n", $headers) . "\r\n",
+            'timeout' => 15,
+            'follow_location' => 1,
+            'max_redirects' => 5,
+        ],
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+        ],
+    ];
+    $context = stream_context_create($opts);
+    $body = @file_get_contents($url, false, $context);
+    return $body !== false ? $body : false;
+}
+
+// 获取洛谷用户页面 HTML（优先 _contentOnly=1 JSON，失败回退 HTML 页面）
+function getLuoguPage($uid) {
+    $json = httpGet("https://www.luogu.com.cn/user/{$uid}?_contentOnly=1", [
+        'Referer: https://www.luogu.com.cn/',
+        'x-lentille-request: content-only',
+        'x-luogu-type: content-only',
+    ]);
+    if ($json !== false) {
+        $data = json_decode($json, true);
+        if ($data && (isset($data['code']) || isset($data['currentData']) || isset($data['data']))) {
+            return $json;
+        }
+    }
+    return httpGet("https://www.luogu.com.cn/user/{$uid}", [
+        'Referer: https://www.luogu.com.cn/',
+    ]);
+}
+
+// 通过洛谷 API 获取用户信息
+function getLuoguUserInfo($uid) {
+    $json = httpGet("https://www.luogu.com.cn/user/{$uid}?_contentOnly=1", [
+        'Referer: https://www.luogu.com.cn/',
+        'x-lentille-request: content-only',
+        'x-luogu-type: content-only',
+    ]);
+    if ($json === false) {
+        return ['success' => false, 'error' => '无法连接洛谷API'];
+    }
+
+    $data = json_decode($json, true);
+    if (!$data) {
+        return ['success' => false, 'error' => '洛谷API返回数据格式错误'];
+    }
+
+    $user = null;
+    if (isset($data['currentData']['user']) && is_array($data['currentData']['user'])) {
+        $user = $data['currentData']['user'];
+    } elseif (isset($data['data']['user']) && is_array($data['data']['user'])) {
+        $user = $data['data']['user'];
+    } elseif (isset($data['user']) && is_array($data['user'])) {
+        $user = $data['user'];
+    }
+
+    if ($user === null) {
+        return ['success' => false, 'error' => '无法从洛谷API提取用户数据'];
+    }
+
+    return ['success' => true, 'data' => $user];
+}
+
+// 从洛谷页面内容提取用户 JSON（兼容 HTML 和 API 响应）
+function parseLuoguJson($html) {
+    if (empty($html)) return null;
+
+    $data = json_decode($html, true);
+    if ($data) {
+        foreach ([
+            ['currentData', 'user'],
+            ['data', 'user'],
+            ['user'],
+            ['data', 'data', 'user'],
+            ['currentData', 'data', 'user'],
+        ] as $path) {
+            $ref = $data;
+            $ok = true;
+            foreach ($path as $key) {
+                if (!isset($ref[$key]) || !is_array($ref[$key])) { $ok = false; break; }
+                $ref = $ref[$key];
+            }
+            if ($ok && isset($ref['name'])) {
+                return $ref;
+            }
+        }
+    }
+
+    if (preg_match('/<script\s+id="lentille-context"[^>]*>(.*?)<\/script>/s', $html, $m)) {
+        $data = json_decode($m[1], true);
+        if ($data) {
+            foreach ([
+                ['data', 'user'],
+                ['currentData', 'user'],
+                ['data', 'data', 'user'],
+                ['currentData', 'data', 'user'],
+                ['user'],
+            ] as $path) {
+                $ref = $data;
+                $ok = true;
+                foreach ($path as $key) {
+                    if (!isset($ref[$key]) || !is_array($ref[$key])) { $ok = false; break; }
+                    $ref = $ref[$key];
+                }
+                if ($ok && isset($ref['name'])) {
+                    return $ref;
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+// 洛谷名字颜色枚举到十六进制
+function luoguColorMap(): array {
+    return [
+        'Gray'    => '#bfbfbf',
+        'Green'   => '#52c41a',
+        'Blue'    => '#3498db',
+        'Purple'  => '#9d3dcf',
+        'Orange'  => '#f39c11',
+        'Red'     => '#fe4c61',
+        'Black'   => '#000000',
+        'Brown'   => '#ad8b00',
+        'Cheater' => '#000000',
+    ];
+}
+
+function parseLuoguColor($html) {
+    $user = parseLuoguJson($html);
+    if ($user && !empty($user['color'])) {
+        return luoguColorMap()[$user['color']] ?? '#fe4c61';
+    }
+    return '#fe4c61';
+}
+
+function parseLuoguHook($html) {
+    $user = parseLuoguJson($html);
+    if ($user && isset($user['badge']) && $user['badge'] !== '') {
+        return $user['badge'];
+    }
+    if (preg_match('/<span[^>]*class="[^"]*\bbadge\b[^"]*"[^>]*>(.*?)<\/span>/s', $html, $m)) {
+        $text = trim(strip_tags($m[1]));
+        if ($text !== '') return $text;
+    }
+    return '';
+}
+
+// 验证洛谷用户签名中是否包含验证码
+function verifyLuoguCode($luogu_uid, $verify_code) {
+    if (empty($luogu_uid) || empty($verify_code)) {
+        return ['success' => false, 'message' => 'UID和验证码不能为空'];
+    }
+
+    $apiResult = getLuoguUserInfo($luogu_uid);
+    if ($apiResult['success']) {
+        $intro = $apiResult['data']['introduction'] ?? '';
+        if (strpos($intro, $verify_code) !== false) {
+            return ['success' => true, 'message' => '验证成功'];
+        }
+    }
+
+    $html = getLuoguPage($luogu_uid);
+    if ($html === false || empty($html)) {
+        return ['success' => false, 'message' => '无法访问洛谷用户页面，请稍后重试或检查UID是否正确'];
+    }
+
+    if (preg_match('/<script\s+id="lentille-context"\s+type="application\/json"\s*>(.*?)<\/script>/s', $html, $m)) {
+        $data = json_decode($m[1], true);
+        if ($data) {
+            $user = null;
+            if (isset($data['data']['user']) && is_array($data['data']['user'])) {
+                $user = $data['data']['user'];
+            } elseif (isset($data['currentData']['user']) && is_array($data['currentData']['user'])) {
+                $user = $data['currentData']['user'];
+            }
+            if ($user) {
+                $intro = $user['introduction'] ?? '';
+                if (strpos($intro, $verify_code) !== false) {
+                    return ['success' => true, 'message' => '验证成功'];
+                }
+            }
+        }
+    }
+
+    $plain = html_entity_decode(strip_tags($html));
+    if (strpos($plain, $verify_code) !== false) {
+        return ['success' => true, 'message' => '验证成功'];
+    }
+
+    return ['success' => false, 'message' => '验证失败，请确保您在洛谷个人签名中填入了验证码 "' . $verify_code . '"'];
+}
+
+// 同步用户洛谷状态（管理员只能刷新钩子）
+function syncLuoguStatus($user_id, $admin_action = false) {
+    $user = getUserById($user_id);
+    if (!$user) {
+        return ['success' => false, 'message' => '用户不存在'];
+    }
+    if (empty($user['luogu_uid']) || empty($user['luogu_verified'])) {
+        return ['success' => false, 'message' => '未绑定洛谷账号'];
+    }
+
+    $luoguResult = getLuoguUserInfo($user['luogu_uid']);
+    if (!$luoguResult['success']) {
+        $html = getLuoguPage($user['luogu_uid']);
+        if ($html === false) {
+            return ['success' => false, 'message' => '无法获取洛谷页面，请稍后重试'];
+        }
+        $hook = parseLuoguHook($html);
+        $color = parseLuoguColor($html);
+    } else {
+        $luoguUser = $luoguResult['data'];
+        $hook = $luoguUser['badge'] ?? '';
+        $color = luoguColorMap()[$luoguUser['color'] ?? ''] ?? '#fe4c61';
+    }
+
+    $db = getDB();
+    $stmt = $db->prepare("UPDATE users SET luogu_hook = ?, luogu_color = ?, luogu_synced_at = NOW() WHERE id = ?");
+    $stmt->execute([$hook, $color, $user_id]);
+    clearUserCache($user_id);
+    return ['success' => true, 'message' => '同步成功', 'hook' => $hook, 'color' => $color];
+}
+// 刷新所有已绑定洛谷账号的用户状态（定时任务）
+function syncAllLuoguStatus() {
+    $db = getDB();
+    try {
+        $stmt = $db->query("SELECT id FROM users WHERE luogu_verified = 1 AND luogu_uid != ''");
+        $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log('[syncAllLuoguStatus] failed: ' . $e->getMessage());
+        return ['success' => false, 'message' => '查询失败'];
+    }
+    $success = 0;
+    $failed = 0;
+    foreach ($users as $u) {
+        $res = syncLuoguStatus($u['id'], false);
+        if ($res['success']) $success++; else $failed++;
+        usleep(200000);
+    }
+    return ['success' => true, 'message' => "同步完成：成功 {$success} 人，失败 {$failed} 人"];
+}
+// 更新用户最后活动时间（节流：60 秒内只更新一次）
+function updateUserActivity($user_id) {
+    $user_id = (int)$user_id;
+    if ($user_id <= 0) return;
+    $cacheKey = 'user_activity_' . $user_id;
+    if (cacheGet($cacheKey) !== null) return;
+    try {
+        $db = getDB();
+        $stmt = $db->prepare("UPDATE users SET last_activity = NOW() WHERE id = ?");
+        $stmt->execute([$user_id]);
+        cacheSet($cacheKey, time(), 60);
+    } catch (PDOException $e) {
+        error_log('[updateUserActivity] failed: ' . $e->getMessage());
+    }
+}
+// 用户是否在线（5 分钟内有过活动）
+function isUserOnline($user_id) {
+    $user = getUserById((int)$user_id);
+    if (!$user || empty($user['last_activity'])) return false;
+    return strtotime($user['last_activity']) > time() - 300;
+}
+// 某洛谷UID已绑定本站账号数量
+function getLuoguBindCount($uid) {
+    $db = getDB();
+    $stmt = $db->prepare("SELECT COUNT(*) FROM users WHERE luogu_uid = ? AND luogu_verified = 1");
+    $stmt->execute([$uid]);
+    return (int)$stmt->fetchColumn();
+}
+// 用户公开信息（个人主页）
+function getUserPublicInfo($user_id) {
+    $db = getDB();
+    $stmt = $db->prepare("SELECT id, username, nickname, bio, role, tag, luogu_uid, luogu_verified, luogu_color, luogu_hook, avatar, created_at, banned FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+// 通过用户名或昵称查找用户
+function getUserByName($name) {
+    $db = getDB();
+    $stmt = $db->prepare("SELECT id, username, nickname FROM users WHERE username = ? OR nickname = ? LIMIT 1");
+    $stmt->execute([$name, $name]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+// 校验用户名格式：字母/数字/下划线，3-20 位，不能以数字开头
+function isValidUsername(string $username): bool {
+    return (bool)preg_match('/^[A-Za-z_][A-Za-z0-9_]{2,19}$/', $username);
+}
+
+// 站点布局内渲染内联错误页（返回 HTML 字符串，调用方负责 echo 和 http_response_code）
+function renderInlineError(int $code, string $title = '', string $subtitle = ''): string {
+    $map = [
+        400 => ['title' => '请求错误', 'subtitle' => '服务器无法理解这个请求。', 'color' => '#f59e0b', 'emoji' => '⚠️'],
+        401 => ['title' => '未登录', 'subtitle' => '此页面需要登录后才能访问。', 'color' => '#f59e0b', 'emoji' => '🔒'],
+        403 => ['title' => '禁止访问', 'subtitle' => '您没有权限查看此页面或执行此操作。', 'color' => '#ef4444', 'emoji' => '⛔'],
+        404 => ['title' => '页面不存在', 'subtitle' => '您访问的页面可能已被删除、改名或从未存在。', 'color' => '#3b82f6', 'emoji' => '🔍'],
+        500 => ['title' => '服务器内部错误', 'subtitle' => '服务器遇到了一些问题，我们正在修复中。', 'color' => '#ef4444', 'emoji' => '💥'],
+        503 => ['title' => '服务不可用', 'subtitle' => '服务器正在维护或暂时过载，请稍后再试。', 'color' => '#f59e0b', 'emoji' => '🛠️'],
+        505 => ['title' => 'HTTP 版本不支持', 'subtitle' => '服务器不支持请求中使用的 HTTP 协议版本。', 'color' => '#ef4444', 'emoji' => '📡'],
+    ];
+    $info = $map[$code] ?? ['title' => '出错了', 'subtitle' => '发生了一些问题，请稍后重试。', 'color' => '#ef4444', 'emoji' => '❌'];
+    if ($title !== '') $info['title'] = $title;
+    if ($subtitle !== '') $info['subtitle'] = $subtitle;
+    $title = htmlspecialchars($info['title']);
+    $subtitle = htmlspecialchars($info['subtitle']);
+    $color = htmlspecialchars($info['color']);
+    $emoji = $info['emoji'];
+    return <<<HTML
+<div class="inline-error-card" style="max-width:520px;margin:24px auto;text-align:center;background:var(--card-bg);border:1px solid var(--card-border);border-radius:16px;padding:48px 32px;box-shadow:var(--shadow);position:relative;overflow:hidden;">
+    <div style="position:absolute;top:0;left:0;right:0;height:6px;background:{$color};"></div>
+    <div style="font-size:64px;line-height:1;margin-bottom:12px;">{$emoji}</div>
+    <div style="font-size:72px;font-weight:900;line-height:1;color:{$color};margin-bottom:6px;letter-spacing:-2px;">{$code}</div>
+    <h1 style="font-size:20px;font-weight:700;color:var(--text-main);margin-bottom:10px;">{$title}</h1>
+    <p style="font-size:14px;color:var(--text-muted);margin-bottom:24px;line-height:1.7;">{$subtitle}</p>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+        <a href="/" class="btn btn-primary">返回首页</a>
+        <button type="button" class="btn" onclick="history.back()" style="background:var(--input-bg);border:1px solid var(--input-border);">返回上一页</button>
+    </div>
+</div>
+HTML;
+}
+
+// 用户名/昵称关键词联想搜索（纯数字时同时按 ID 匹配）
+// ATTR_EMULATE_PREPARES=false 模式下 LIMIT ? 必须用 bindValue(PARAM_INT)
+function searchUsersByName($keyword, $limit = 10) {
+    $db = getDB();
+    $like = '%' . $keyword . '%';
+    if (ctype_digit($keyword)) {
+        $stmt = $db->prepare("SELECT id, username, nickname, role FROM users WHERE username LIKE ? OR nickname LIKE ? OR id = ? ORDER BY id ASC LIMIT ?");
+        $stmt->bindValue(1, $like, PDO::PARAM_STR);
+        $stmt->bindValue(2, $like, PDO::PARAM_STR);
+        $stmt->bindValue(3, (int)$keyword, PDO::PARAM_INT);
+        $stmt->bindValue(4, (int)$limit, PDO::PARAM_INT);
+    } else {
+        $stmt = $db->prepare("SELECT id, username, nickname, role FROM users WHERE username LIKE ? OR nickname LIKE ? ORDER BY id ASC LIMIT ?");
+        $stmt->bindValue(1, $like, PDO::PARAM_STR);
+        $stmt->bindValue(2, $like, PDO::PARAM_STR);
+        $stmt->bindValue(3, (int)$limit, PDO::PARAM_INT);
+    }
+    $stmt->execute();
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function getArticleReplies($articleId) {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT r.*, u.id AS user_id, u.username, u.nickname, u.role, u.tag, u.banned, u.luogu_color, u.luogu_hook, u.avatar FROM article_replies r LEFT JOIN users u ON r.user_id = u.id WHERE r.article_id = ? ORDER BY r.created_at ASC LIMIT 200");
+        $stmt->execute([(int)$articleId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log('[getArticleReplies] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function canDeleteArticleReply($reply, $currentUser) {
+    if (!$currentUser) return false;
+    if (isAdmin($currentUser['id'])) return true;
+    return (int)$reply['user_id'] === (int)$currentUser['id'];
+}
+
+function getSiteRules() {
+    $db = getDB();
+    try {
+        $stmt = $db->query("SELECT * FROM site_rules ORDER BY updated_at DESC LIMIT 1");
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $updater = getUserById($row['updated_by']);
+            $row['updater_name'] = !empty($updater['nickname']) ? $updater['nickname'] : ($updater['username'] ?? '未知');
+        }
+        return $row;
+    } catch (PDOException $e) {
+        error_log('[getSiteRules] failed: ' . $e->getMessage());
+        return null;
+    }
+}
+// 站点自定义页面（管理员后台编辑，前台展示）
+function getSitePage(string $slug): ?array {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT * FROM site_pages WHERE slug = ? LIMIT 1");
+        $stmt->execute([$slug]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $updater = getUserById($row['updated_by']);
+            $row['updater_name'] = !empty($updater['nickname']) ? $updater['nickname'] : ($updater['username'] ?? '未知');
+        }
+        return $row ?: null;
+    } catch (PDOException $e) {
+        error_log('[getSitePage] failed: ' . $e->getMessage());
+        return null;
+    }
+}
+function updateSitePage(string $slug, string $title, string $content, int $updatedBy): bool {
+    $db = getDB();
+    try {
+        $existing = $db->prepare("SELECT id FROM site_pages WHERE slug = ? LIMIT 1");
+        $existing->execute([$slug]);
+        $id = $existing->fetchColumn();
+        if ($id) {
+            $db->prepare("UPDATE site_pages SET title = ?, content = ?, updated_by = ? WHERE id = ?")
+                ->execute([$title, $content, $updatedBy, $id]);
+        } else {
+            $db->prepare("INSERT INTO site_pages (slug, title, content, updated_by) VALUES (?, ?, ?, ?)")
+                ->execute([$slug, $title, $content, $updatedBy]);
+        }
+        return true;
+    } catch (PDOException $e) {
+        error_log('[updateSitePage] failed: ' . $e->getMessage());
+        return false;
+    }
+}
+
+// 清洁 URL 路由解析
+function parseRoutePath() {
+    $uri = $_SERVER['REQUEST_URI'] ?? '/';
+    $path = parse_url($uri, PHP_URL_PATH) ?: '/';
+    $segments = array_values(array_filter(explode('/', $path), function ($s) { return $s !== ''; }));
+    return $segments;
+}
+
+// CP OAuth（https://www.cpoauth.com/）
+function cpoauthCallbackUrl(): string {
+    if (defined('CPOAUTH_REDIRECT_URI') && CPOAUTH_REDIRECT_URI !== '') {
+        return rtrim(CPOAUTH_REDIRECT_URI, '/');
+    }
+    $scheme = 'http';
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        $scheme = 'https';
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+        $scheme = strtolower(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'])[0]);
+    }
+    $host = $_SERVER['HTTP_X_FORWARDED_HOST'] ?? ($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $host = trim(explode(',', $host)[0]);
+    return $scheme . '://' . $host . '/cpoauth/callback';
+}
+
+// 发起 CP OAuth 授权（重定向到 cpoauth.com 授权页）
+function cpoauthInitiate(string $mode = 'login'): void {
+    if (!defined('CPOAUTH_CLIENT_ID')) {
+        $_SESSION['error'] = 'CP OAuth 未配置';
+        header('Location: /login');
+        exit;
+    }
+    $state = bin2hex(random_bytes(16));
+    $_SESSION['cpoauth_state'] = $state;
+    $_SESSION['cpoauth_mode'] = $mode;
+    $params = http_build_query([
+        'client_id'     => CPOAUTH_CLIENT_ID,
+        'redirect_uri'  => cpoauthCallbackUrl(),
+        'response_type' => 'code',
+        'scope'         => CPOAUTH_SCOPE,
+        'state'         => $state,
+    ]);
+    header('Location: ' . CPOAUTH_AUTHORIZE_URL . '?' . $params);
+    exit;
+}
+
+// 用授权码换取 access_token
+function cpoauthExchangeCode(string $code): ?array {
+    $redirectUri = cpoauthCallbackUrl();
+    $payload = http_build_query([
+        'grant_type'    => 'authorization_code',
+        'code'          => $code,
+        'redirect_uri'  => $redirectUri,
+        'client_id'     => CPOAUTH_CLIENT_ID,
+        'client_secret' => CPOAUTH_CLIENT_SECRET,
+    ]);
+    $ctx = stream_context_create([
+        'http' => [
+            'method'  => 'POST',
+            'header'  => "Content-Type: application/x-www-form-urlencoded\r\nAccept: application/json\r\n",
+            'content' => $payload,
+            'timeout' => 20,
+            'ignore_errors' => true,
+        ],
+        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]);
+    $raw = @file_get_contents(CPOAUTH_TOKEN_URL, false, $ctx);
+    if ($raw === false) {
+        error_log('[CP OAuth] token 请求失败：file_get_contents 返回 false。redirect_uri=' . $redirectUri);
+        return ['error' => 'network_error', 'error_description' => '无法连接到 CP OAuth 服务器'];
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        error_log('[CP OAuth] token 响应解析失败：' . substr($raw, 0, 500));
+        return ['error' => 'parse_error', 'error_description' => 'CP OAuth 返回了无法解析的响应：' . substr($raw, 0, 200)];
+    }
+    if (empty($data['access_token'])) {
+        error_log('[CP OAuth] token 获取失败：' . substr($raw, 0, 500) . ' | redirect_uri=' . $redirectUri);
+    }
+    return $data;
+}
+
+// 用 access_token 获取用户信息
+function cpoauthGetUserInfo(string $accessToken): ?array {
+    $ctx = stream_context_create([
+        'http' => [
+            'method'  => 'GET',
+            'header'  => "Authorization: Bearer {$accessToken}\r\nAccept: application/json\r\n",
+            'timeout' => 15,
+            'ignore_errors' => true,
+        ],
+        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]);
+    $raw = @file_get_contents(CPOAUTH_USERINFO_URL, false, $ctx);
+    if ($raw === false) {
+        error_log('[CP OAuth] userinfo 请求失败：file_get_contents 返回 false');
+        return null;
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        error_log('[CP OAuth] userinfo 响应解析失败：' . substr($raw, 0, 500));
+        return null;
+    }
+    return $data;
+}
+
+// 处理 CP OAuth 回调（登录或绑定）
+function cpoauthHandleCallback(): void {
+    $error = $_GET['error'] ?? '';
+    $code = $_GET['code'] ?? '';
+    $state = $_GET['state'] ?? '';
+
+    if ($error) {
+        $_SESSION['error'] = 'CP OAuth 授权失败：' . htmlspecialchars($error);
+        cpoauthRedirectAfter();
+    }
+    if (!$code || !$state) {
+        $_SESSION['error'] = 'CP OAuth 回调参数缺失';
+        cpoauthRedirectAfter();
+    }
+    $savedState = $_SESSION['cpoauth_state'] ?? '';
+    if (!$savedState || !hash_equals($savedState, $state)) {
+        error_log('[CP OAuth] state 校验失败（CSRF 防护）');
+        $_SESSION['error'] = 'CP OAuth 状态校验失败（CSRF 防护）';
+        cpoauthRedirectAfter();
+    }
+
+    $tokenData = cpoauthExchangeCode($code);
+    $accessToken = $tokenData['access_token'] ?? '';
+    if (!$accessToken) {
+        $errCode = $tokenData['error'] ?? 'unknown';
+        $errDesc = $tokenData['error_description'] ?? $tokenData['message'] ?? '';
+        $detail = $errCode;
+        if ($errDesc) $detail .= '：' . $errDesc;
+        $_SESSION['error'] = 'CP OAuth 获取令牌失败（' . $detail . '）';
+        cpoauthRedirectAfter();
+    }
+
+    $userInfo = cpoauthGetUserInfo($accessToken);
+    $cpId = (string)($userInfo['sub'] ?? '');
+    $cpUsername = (string)($userInfo['username'] ?? ($userInfo['display_name'] ?? ''));
+    if ($cpId === '') {
+        $_SESSION['error'] = 'CP OAuth 未返回用户标识';
+        cpoauthRedirectAfter();
+    }
+
+    $db = getDB();
+    $mode = $_SESSION['cpoauth_mode'] ?? 'login';
+    unset($_SESSION['cpoauth_state'], $_SESSION['cpoauth_mode']);
+
+    if ($mode === 'bind') {
+        $user = getCurrentUser();
+        if (!$user) {
+            $_SESSION['error'] = '请先登录后再绑定 CP OAuth';
+            header('Location: /login'); exit;
+        }
+        $chk = $db->prepare("SELECT id FROM users WHERE cpoauth_id = ? AND id != ?");
+        $chk->execute([$cpId, $user['id']]);
+        if ($chk->fetch()) {
+            $_SESSION['error'] = '此 CP OAuth 账号已绑定其他用户';
+            header('Location: /profile?tab=binding'); exit;
+        }
+        $db->prepare("UPDATE users SET cpoauth_id = ?, cpoauth_username = ?, cpoauth_bound_at = NOW() WHERE id = ?")
+            ->execute([$cpId, $cpUsername, $user['id']]);
+        clearUserCache($user['id']);
+        logOperation('cpoauth_bind', 'user', $user['id']);
+        $_SESSION['success'] = 'CP OAuth 账号绑定成功（' . htmlspecialchars($cpUsername) . '）';
+        header('Location: /profile?tab=binding'); exit;
+    } else {
+        $stmt = $db->prepare("SELECT id, banned FROM users WHERE cpoauth_id = ? LIMIT 1");
+        $stmt->execute([$cpId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            $_SESSION['error'] = '此 CP OAuth 账号未绑定本站用户，请先注册并在安全设置中绑定。';
+            header('Location: /login'); exit;
+        }
+        if (!empty($row['banned'])) {
+            $_SESSION['error'] = '账号已被封禁';
+            header('Location: /login'); exit;
+        }
+        $db->prepare("UPDATE users SET cpoauth_username = ?, last_activity = NOW(), last_ip = ? WHERE id = ?")
+            ->execute([$cpUsername, ($_SERVER['REMOTE_ADDR'] ?? ''), $row['id']]);
+        clearUserCache($row['id']);
+        $_SESSION['user_id'] = (int)$row['id'];
+        session_regenerate_id(true);
+        logOperation('cpoauth_login', 'user', $row['id']);
+        $_SESSION['success'] = '已通过 CP OAuth 登录';
+        header('Location: /'); exit;
+    }
+}
+
+// 回调失败后的统一跳转
+function cpoauthRedirectAfter(): void {
+    $mode = $_SESSION['cpoauth_mode'] ?? 'login';
+    unset($_SESSION['cpoauth_state'], $_SESSION['cpoauth_mode']);
+    header('Location: ' . ($mode === 'bind' ? '/profile?tab=binding' : '/login'));
+    exit;
+}
+
+// 解绑 CP OAuth
+function cpoauthUnbind(): void {
+    $user = getCurrentUser();
+    if (!$user) { $_SESSION['error'] = '请先登录'; header('Location: /login'); exit; }
+    $db = getDB();
+    $db->prepare("UPDATE users SET cpoauth_id = '', cpoauth_username = '', cpoauth_bound_at = NULL WHERE id = ?")
+        ->execute([$user['id']]);
+    clearUserCache($user['id']);
+    logOperation('cpoauth_unbind', 'user', $user['id']);
+    $_SESSION['success'] = 'CP OAuth 账号已解绑';
+    header('Location: /profile?tab=binding');
+    exit;
+}
+
+// 题目（Problems）：确保 problems / problem_submissions / problem_testcases 表存在并补齐缺失字段
+function ensureProblemsTables(): void {
+    $db = getDB();
+    $addColumnIfMissing = function ($table, $col, $def) use ($db) {
+        if (!columnExists($table, $col)) {
+            try {
+                $db->exec("ALTER TABLE `{$table}` ADD COLUMN {$col} {$def}");
+                cacheClear("col_exists_{$table}_{$col}");
+            } catch (PDOException $e) {
+                error_log('[ensureProblemsTables] addColumn ' . $table . '.' . $col . ' failed: ' . $e->getMessage());
+            }
+        }
+    };
+    if (!tableExists('problems')) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS problems (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(200) NOT NULL,
+                description MEDIUMTEXT NOT NULL,
+                input_format TEXT DEFAULT '',
+                output_format TEXT DEFAULT '',
+                sample_input TEXT DEFAULT '',
+                sample_output TEXT DEFAULT '',
+                hint TEXT DEFAULT '',
+                time_limit INT DEFAULT 1000,
+                memory_limit INT DEFAULT 256,
+                tags VARCHAR(200) DEFAULT '',
+                difficulty VARCHAR(30) DEFAULT '入门',
+                source VARCHAR(100) DEFAULT '',
+                visible TINYINT(1) DEFAULT 1,
+                created_by INT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_difficulty (difficulty),
+                INDEX idx_visible (visible),
+                INDEX idx_created_at (created_at),
+                INDEX idx_created_by (created_by)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            cacheClear("table_exists_problems");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] create problems failed: ' . $e->getMessage());
+        }
+    }
+    // 旧表字段补齐
+    $addColumnIfMissing('problems', 'description', "MEDIUMTEXT NOT NULL");
+    $addColumnIfMissing('problems', 'input_format', "TEXT DEFAULT ''");
+    $addColumnIfMissing('problems', 'output_format', "TEXT DEFAULT ''");
+    $addColumnIfMissing('problems', 'sample_input', "TEXT DEFAULT ''");
+    $addColumnIfMissing('problems', 'sample_output', "TEXT DEFAULT ''");
+    $addColumnIfMissing('problems', 'hint', "TEXT DEFAULT ''");
+    $addColumnIfMissing('problems', 'time_limit', "INT DEFAULT 1000");
+    $addColumnIfMissing('problems', 'memory_limit', "INT DEFAULT 256");
+    $addColumnIfMissing('problems', 'tags', "VARCHAR(200) DEFAULT ''");
+    $addColumnIfMissing('problems', 'difficulty', "VARCHAR(30) DEFAULT NULL");
+    $addColumnIfMissing('problems', 'source', "VARCHAR(100) DEFAULT ''");
+    $addColumnIfMissing('problems', 'visible', "TINYINT(1) DEFAULT 1");
+    $addColumnIfMissing('problems', 'created_by', "INT NOT NULL DEFAULT 0");
+    $addColumnIfMissing('problems', 'updated_at', "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+
+    if (!tableExists('problem_submissions')) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS problem_submissions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                problem_id INT NOT NULL,
+                user_id INT NOT NULL,
+                code MEDIUMTEXT NOT NULL,
+                language VARCHAR(30) DEFAULT 'cpp',
+                status VARCHAR(20) DEFAULT 'pending',
+                score INT DEFAULT 0,
+                time_used INT DEFAULT 0,
+                memory_used INT DEFAULT 0,
+                error_message TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_problem_id (problem_id),
+                INDEX idx_user_id (user_id),
+                INDEX idx_status (status),
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            cacheClear("table_exists_problem_submissions");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] create problem_submissions failed: ' . $e->getMessage());
+        }
+    }
+    $addColumnIfMissing('problem_submissions', 'problem_id', "INT NOT NULL DEFAULT 0");
+    $addColumnIfMissing('problem_submissions', 'user_id', "INT NOT NULL DEFAULT 0");
+    $addColumnIfMissing('problem_submissions', 'code', "MEDIUMTEXT NOT NULL");
+    $addColumnIfMissing('problem_submissions', 'language', "VARCHAR(30) DEFAULT 'cpp'");
+    $addColumnIfMissing('problem_submissions', 'status', "VARCHAR(20) DEFAULT 'pending'");
+    $addColumnIfMissing('problem_submissions', 'score', "INT DEFAULT 0");
+    $addColumnIfMissing('problem_submissions', 'time_used', "INT DEFAULT 0");
+    $addColumnIfMissing('problem_submissions', 'memory_used', "INT DEFAULT 0");
+    $addColumnIfMissing('problem_submissions', 'error_message', "TEXT DEFAULT ''");
+
+    // 题目测试点表
+    if (!tableExists('problem_testcases')) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS problem_testcases (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                problem_id INT NOT NULL,
+                name VARCHAR(100) DEFAULT '',
+                input_file VARCHAR(255) NOT NULL DEFAULT '',
+                output_file VARCHAR(255) NOT NULL DEFAULT '',
+                is_sample TINYINT(1) DEFAULT 0,
+                score INT DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_problem_id (problem_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci");
+            cacheClear("table_exists_problem_testcases");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] create problem_testcases failed: ' . $e->getMessage());
+        }
+    }
+    $addColumnIfMissing('problem_testcases', 'problem_id', "INT NOT NULL DEFAULT 0");
+    $addColumnIfMissing('problem_testcases', 'name', "VARCHAR(100) DEFAULT ''");
+    $addColumnIfMissing('problem_testcases', 'input_file', "VARCHAR(255) NOT NULL DEFAULT ''");
+    $addColumnIfMissing('problem_testcases', 'output_file', "VARCHAR(255) NOT NULL DEFAULT ''");
+    $addColumnIfMissing('problem_testcases', 'is_sample', "TINYINT(1) DEFAULT 0");
+    $addColumnIfMissing('problem_testcases', 'score', "INT DEFAULT 0");
+
+    // 字符集转换：仅在表非新建且本请求首次执行时做一次
+    static $charsetConverted = false;
+    if (!$charsetConverted) {
+        try {
+            $db->exec("ALTER TABLE problems CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] convert problems charset failed: ' . $e->getMessage());
+        }
+        try {
+            $db->exec("ALTER TABLE problem_submissions CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] convert problem_submissions charset failed: ' . $e->getMessage());
+        }
+        try {
+            $db->exec("ALTER TABLE problem_testcases CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        } catch (PDOException $e) {
+            error_log('[ensureProblemsTables] convert problem_testcases charset failed: ' . $e->getMessage());
+        }
+        $charsetConverted = true;
+    }
+}
+
+// 获取题目的所有测试点（按 id 升序）
+function getProblemTestcases(int $problem_id): array {
+    if ($problem_id <= 0) return [];
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT * FROM problem_testcases WHERE problem_id = ? ORDER BY id ASC LIMIT 200");
+        $stmt->execute([$problem_id]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        error_log('[getProblemTestcases] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+// 测试点文件存储目录
+function testcaseDir(int $problem_id): string {
+    return __DIR__ . '/uploads/testcases/' . $problem_id;
+}
+
+// 删除测试点（含数据库记录和物理文件）
+function deleteTestcase(int $testcase_id): array {
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT * FROM problem_testcases WHERE id = ?");
+        $stmt->execute([$testcase_id]);
+        $tc = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$tc) {
+            return ['success' => false, 'message' => '测试点不存在'];
+        }
+        $db->prepare("DELETE FROM problem_testcases WHERE id = ?")->execute([$testcase_id]);
+        foreach (['input_file', 'output_file'] as $field) {
+            $rel = $tc[$field] ?? '';
+            if ($rel !== '') {
+                $abs = __DIR__ . '/' . $rel;
+                if (is_file($abs) && !@unlink($abs)) {
+                    error_log('[deleteTestcase] unlink 失败：' . $abs);
+                }
+            }
+        }
+        return ['success' => true, 'message' => '测试点已删除'];
+    } catch (PDOException $e) {
+        error_log('[deleteTestcase] tcid=' . $testcase_id . ' ' . $e->getMessage());
+        return ['success' => false, 'message' => '删除失败，请稍后重试'];
+    }
+}
+
+// 按 ID 获取题目（带内存缓存）
+function getProblemById($id) {
+    $id = (int)$id;
+    if ($id <= 0) return [];
+    $cacheKey = 'problem_' . $id;
+    $cached = cacheGet($cacheKey);
+    if ($cached !== null) return $cached;
+    $db = getDB();
+    try {
+        $stmt = $db->prepare("SELECT * FROM problems WHERE id = ?");
+        $stmt->execute([$id]);
+        return cacheSet($cacheKey, $stmt->fetch(PDO::FETCH_ASSOC) ?: []);
+    } catch (PDOException $e) {
+        error_log('[getProblemById] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function clearProblemCache($id) {
+    cacheClear('problem_' . (int)$id);
+}
+
+// 难度配色
+function getDifficultyColor(string $difficulty): string {
+    $map = [
+        '简单' => '#10b981',
+        '中等' => '#f59e0b',
+        '困难' => '#ef4444',
+    ];
+    return $map[$difficulty] ?? '#808080';
+}
+
+// 难度对应的点亮格数（1-5）
+function getDifficultyLevel(string $difficulty): int {
+    $map = [
+        '简单' => 1,
+        '中等' => 3,
+        '困难' => 5,
+    ];
+    return $map[$difficulty] ?? 1;
+}
+
+// 渲染难度条（5 个圆点）
+function renderDifficultyBar(string $difficulty): string {
+    $color = getDifficultyColor($difficulty);
+    $level = getDifficultyLevel($difficulty);
+    $html = '<span class="diff-bar" style="color:' . $color . ';">';
+    for ($i = 1; $i <= 5; $i++) {
+        $html .= '<span class="dot' . ($i <= $level ? ' on' : '') . '"></span>';
+    }
+    $html .= '<span class="diff-label">' . htmlspecialchars($difficulty) . '</span></span>';
+    return $html;
+}
+
+// 渲染难度彩色 pill 徽章（8 档难度）
+function renderDifficultyPill(string $difficulty): string {
+    $difficulty = $difficulty ?: '入门';
+    $map = [
+        '入门' => 1, '普及-' => 2, '普及' => 3, '普及+/提高-' => 4,
+        '提高' => 5, '提高+/省选-' => 6, '省选/NOI-' => 7, 'NOI/NOI+/CTS' => 8,
+        '简单' => 1, '中等' => 4, '困难' => 7,
+    ];
+    $lvl = $map[$difficulty] ?? 1;
+    return '<span class="diff-pill diff-pill-' . $lvl . '">' . htmlspecialchars($difficulty) . '</span>';
+}
+
+// 提交状态中文标签
+function getSubmissionStatusLabel(string $status): string {
+    $map = [
+        'pending'   => '等待评测',
+        'judging'   => '评测中',
+        'accepted'  => '通过',
+        'wrong'     => '答案错误',
+        'tle'       => '超时',
+        'mle'       => '内存超限',
+        're'        => '运行错误',
+        'ce'        => '编译错误',
+    ];
+    return $map[$status] ?? $status;
+}
+
+// 提交状态颜色
+function getSubmissionStatusColor(string $status): string {
+    $map = [
+        'pending'   => '#6b7280',
+        'judging'   => '#3b82f6',
+        'accepted'  => '#10b981',
+        'wrong'     => '#ef4444',
+        'tle'       => '#f59e0b',
+        'mle'       => '#f59e0b',
+        're'        => '#ef4444',
+        'ce'        => '#8b5cf6',
+    ];
+    return $map[$status] ?? '#808080';
+}
+
+// 支持的提交语言列表
+function getProblemLanguages(): array {
+    return [
+        'c'         => 'C',
+        'csharp'    => 'C#',
+        'cpp11'     => 'C++11',
+        'cpp11_o2'  => 'C++11(O2)',
+        'cpp14'     => 'C++14',
+        'cpp14_o2'  => 'C++14(O2)',
+        'cpp23'     => 'C++23',
+        'cpp23_o2'  => 'C++23(O2)',
+        'python3'   => 'Python 3',
+        // 旧代码兼容：cpp / python 仍允许提交，但 UI 不再展示
+        'cpp'       => 'C++',
+        'python'    => 'Python',
+        'java'      => 'Java',
+        'pascal'    => 'Pascal',
+    ];
+}
+
+// UI 下拉框使用的语言列表（不含旧别名）
+// 若管理员设置了 judge_enabled_languages 则只展示启用子集
+function getProblemLanguagesForUI(): array {
+    $all = [
+        'c'         => 'C',
+        'csharp'    => 'C#',
+        'cpp11'     => 'C++11',
+        'cpp11_o2'  => 'C++11(O2)',
+        'cpp14'     => 'C++14',
+        'cpp14_o2'  => 'C++14(O2)',
+        'cpp23'     => 'C++23',
+        'cpp23_o2'  => 'C++23(O2)',
+        'python3'   => 'Python 3',
+    ];
+    $enabled = getSetting('judge_enabled_languages', '');
+    $enabled = trim((string)$enabled);
+    if ($enabled === '') {
+        return $all;
+    }
+    $enabledList = array_filter(array_map('trim', explode(',', $enabled)));
+    if (empty($enabledList)) {
+        return $all;
+    }
+    $result = [];
+    foreach ($enabledList as $code) {
+        if (isset($all[$code])) {
+            $result[$code] = $all[$code];
+        }
+    }
+    return empty($result) ? $all : $result;
+}
+
+// 规范化语言代码：旧别名映射到新代码
+function normalizeLanguage(string $lang): string {
+    $alias = [
+        'cpp'    => 'cpp14',
+        'python' => 'python3',
+    ];
+    return $alias[$lang] ?? $lang;
+}
+
+// 站点配置访问器（site_settings 表 key-value 读写）
+$GLOBALS['_settings_cache'] = [];
+
+// 读取站点配置项：DB > config.php 全局变量 > $default
+function getSetting(string $key, $default = ''): string {
+    if (array_key_exists($key, $GLOBALS['_settings_cache'])) {
+        return $GLOBALS['_settings_cache'][$key];
+    }
+    $value = null;
+    try {
+        $db = getDB();
+        $stmt = $db->prepare("SELECT setting_value FROM site_settings WHERE setting_key = ? LIMIT 1");
+        $stmt->execute([$key]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row !== false) {
+            $value = (string)$row['setting_value'];
+        }
+    } catch (Throwable $e) {
+        error_log('[getSetting] ' . $key . ' failed: ' . $e->getMessage());
+        $value = null;
+    }
+    // DB 无值时回退到 config.php 全局变量
+    if ($value === null) {
+        $fallbackMap = [
+            'judge_github_token' => 'github_token',
+            'judge_api_key'      => 'api_key',
+        ];
+        if (isset($fallbackMap[$key])) {
+            $varName = $fallbackMap[$key];
+            if (isset($GLOBALS[$varName])) {
+                $value = (string)$GLOBALS[$varName];
+            }
+        }
+    }
+    if ($value === null) {
+        $value = $default;
+    }
+    $GLOBALS['_settings_cache'][$key] = $value;
+    return $value;
+}
+
+// 写入站点配置项（upsert）
+function setSetting(string $key, string $value, $updatedBy = null): bool {
+    try {
+        $db = getDB();
+        $stmt = $db->prepare(
+            "INSERT INTO site_settings (setting_key, setting_value, updated_by, updated_at)
+             VALUES (?, ?, ?, NOW())
+             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_by = VALUES(updated_by), updated_at = NOW()"
+        );
+        $ok = $stmt->execute([$key, $value, $updatedBy]);
+        $GLOBALS['_settings_cache'][$key] = $value;
+        return $ok;
+    } catch (Throwable $e) {
+        error_log('[setSetting] ' . $key . ' 写入失败：' . $e->getMessage());
+        return false;
+    }
+}
+
+// 获取评测机完整配置
+function getJudgeConfig(): array {
+    $config = [
+        'github_token'    => '',
+        'repo_owner'      => 'HhoJ-Dev',
+        'repo_name'       => 'HhOJ-Online-Judge-Service',
+        'workflow_id'     => 'judge.yml',
+        'branch'          => 'main',
+        'github_username' => '',
+        'api_key'         => '',
+        'enabled_languages' => '',
+    ];
+    try {
+        $db = getDB();
+        $stmt = $db->query("SELECT setting_key, setting_value FROM site_settings WHERE setting_key LIKE 'judge_%'");
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $key = (string)$row['setting_key'];
+            $val = (string)$row['setting_value'];
+            switch ($key) {
+                case 'judge_github_token':    $config['github_token'] = $val; break;
+                case 'judge_repo_owner':      $config['repo_owner'] = $val ?: $config['repo_owner']; break;
+                case 'judge_repo_name':       $config['repo_name'] = $val ?: $config['repo_name']; break;
+                case 'judge_workflow_id':     $config['workflow_id'] = $val ?: $config['workflow_id']; break;
+                case 'judge_branch':          $config['branch'] = $val ?: $config['branch']; break;
+                case 'judge_github_username': $config['github_username'] = $val; break;
+                case 'judge_api_key':         $config['api_key'] = $val; break;
+                case 'judge_enabled_languages': $config['enabled_languages'] = $val; break;
+            }
+            $GLOBALS['_settings_cache'][$key] = $val;
+        }
+    } catch (Throwable $e) {
+        error_log('[getJudgeConfig] failed: ' . $e->getMessage());
+    }
+    if ($config['github_token'] === '' && isset($GLOBALS['github_token'])) {
+        $config['github_token'] = (string)$GLOBALS['github_token'];
+    }
+    if ($config['api_key'] === '' && isset($GLOBALS['api_key'])) {
+        $config['api_key'] = (string)$GLOBALS['api_key'];
+    }
+    return $config;
+}
+
+// 测试 GitHub Token 是否能访问配置的仓库
+function testJudgeConnection(): array {
+    $cfg = getJudgeConfig();
+    if (empty($cfg['github_token'])) {
+        return ['success' => false, 'http_code' => 0, 'message' => '未配置 GitHub Token'];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'http_code' => 0, 'message' => '服务器未启用 cURL'];
+    }
+    $url = "https://api.github.com/repos/{$cfg['repo_owner']}/{$cfg['repo_name']}";
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['success' => false, 'http_code' => 0, 'message' => '无法初始化 cURL'];
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/vnd.github.v3+json',
+            'Authorization: token ' . $cfg['github_token'],
+            'User-Agent: HhOJ-Test/1.0',
+        ],
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $http_code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_err = curl_error($ch);
+    curl_close($ch);
+
+    if ($http_code === 200) {
+        return ['success' => true, 'http_code' => 200, 'message' => '连接成功，Token 可访问该仓库'];
+    }
+    $body = is_string($response) ? $response : '';
+    $parsed = json_decode($body, true);
+    $ghMsg = is_array($parsed) && isset($parsed['message']) ? (string)$parsed['message'] : '';
+    $msg = "HTTP {$http_code}";
+    if ($http_code === 0) {
+        $msg = '网络请求失败：' . $curl_err;
+    } elseif ($http_code === 404) {
+        $msg = '仓库不存在或 Token 无权限访问（owner/repo 配置错误，或 Token 未对该仓库授权）';
+    } elseif ($http_code === 401) {
+        $msg = 'Token 无效（Bad credentials）';
+    } elseif ($http_code === 403) {
+        if (stripos($ghMsg, 'lifetime is greater than 366 days') !== false) {
+            $msg = 'Token 被组织禁用（有效期超 366 天），需重新生成 ≤ 366 天的 fine-grained PAT';
+        } else {
+            $msg = 'Token 权限不足：' . $ghMsg;
+        }
+    } elseif ($ghMsg) {
+        $msg .= '：' . $ghMsg;
+    }
+    return ['success' => false, 'http_code' => $http_code, 'message' => $msg];
+}
+
+// 触发评测机（调用 GitHub Actions 工作流）
+// v5：从 judge_runners 表按 priority 升序读取所有 enabled 评测机，同 priority 多机随机选一个；
+// 触发失败自动 fallback 到下一优先级组；表为空时回退到 getJudgeConfig() 单配置
+function triggerJudge(?int $runnerId = null): array {
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'message' => '服务器未启用 cURL', 'reason' => 'no_curl', 'runner_id' => null, 'runner_name' => ''];
+    }
+
+    // 节流：5 秒内多次触发只发一次（批量提交场景）；指定 runnerId 时不节流
+    static $lastTriggerTime = 0;
+    $now = time();
+    if ($runnerId === null && $now - $lastTriggerTime < 5) {
+        return ['success' => true, 'message' => '评测任务已触发（节流合并）', 'reason' => 'throttled', 'runner_id' => null, 'runner_name' => ''];
+    }
+
+    $candidates = [];
+    if ($runnerId !== null) {
+        $runner = getJudgeRunnerById($runnerId);
+        if ($runner === null) {
+            return ['success' => false, 'message' => "评测机 #{$runnerId} 不存在", 'reason' => 'runner_not_found', 'runner_id' => $runnerId, 'runner_name' => ''];
+        }
+        if (!$runner['enabled']) {
+            return ['success' => false, 'message' => "评测机「{$runner['name']}」已被禁用", 'reason' => 'runner_disabled', 'runner_id' => $runnerId, 'runner_name' => $runner['name']];
+        }
+        $candidates = [$runner];
+    } else {
+        $candidates = getEnabledJudgeRunners();
+        if (empty($candidates)) {
+            $cfg = getJudgeConfig();
+            if (empty($cfg['github_token']) || empty($cfg['api_key'])) {
+                return ['success' => false, 'message' => '评测服务未配置（请在后台 /admin 添加评测机）', 'reason' => 'config_missing', 'runner_id' => null, 'runner_name' => ''];
+            }
+            $candidates = [[
+                'id' => 0, 'name' => '默认评测机(配置兼容)', 'priority' => 100, 'enabled' => 1,
+                'owner' => $cfg['repo_owner'], 'repo' => $cfg['repo_name'],
+                'workflow_id' => $cfg['workflow_id'], 'branch' => $cfg['branch'],
+                'github_token' => $cfg['github_token'], 'api_key' => $cfg['api_key'],
+            ]];
+        }
+    }
+
+    // 按 priority 分组：同 priority 多机随机选一个，失败 fallback 到下一组
+    $grouped = [];
+    foreach ($candidates as $r) {
+        $p = (int)$r['priority'];
+        $grouped[$p][] = $r;
+    }
+    ksort($grouped);
+
+    $lastError = '';
+    $lastReason = '';
+    foreach ($grouped as $priority => $runnersInGroup) {
+        shuffle($runnersInGroup);
+        foreach ($runnersInGroup as $runner) {
+            $r = triggerSingleJudgeRunner($runner);
+            if ($r['success']) {
+                if ($runnerId === null) {
+                    $lastTriggerTime = $now;
+                }
+                return $r;
+            }
+            $lastError = $r['message'];
+            $lastReason = $r['reason'];
+        }
+    }
+
+    return [
+        'success' => false,
+        'message' => $lastError ?: '所有评测机均触发失败',
+        'reason'  => $lastReason ?: 'all_runners_failed',
+        'runner_id' => null,
+        'runner_name' => '',
+    ];
+}
+
+// 触发单个评测机
+function triggerSingleJudgeRunner(array $runner): array {
+    $rid = (int)($runner['id'] ?? 0);
+    $rname = (string)($runner['name'] ?? '');
+    $token = (string)($runner['github_token'] ?? '');
+    $apiKey = (string)($runner['api_key'] ?? '');
+
+    if (empty($token) || empty($apiKey)) {
+        return ['success' => false, 'message' => "评测机「{$rname}」未配置 Token 或 API Key", 'reason' => 'config_missing', 'runner_id' => $rid, 'runner_name' => $rname];
+    }
+
+    $owner = (string)($runner['owner'] ?? '');
+    $repo  = (string)($runner['repo'] ?? '');
+    $workflow_id = (string)($runner['workflow_id'] ?? 'judge.yml');
+    $branch = (string)($runner['branch'] ?? 'main');
+
+    $url = "https://api.github.com/repos/{$owner}/{$repo}/actions/workflows/{$workflow_id}/dispatches";
+    $data = json_encode(['ref' => $branch]);
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['success' => false, 'message' => '无法初始化 cURL', 'reason' => 'curl_init_failed', 'runner_id' => $rid, 'runner_name' => $rname];
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $data,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/vnd.github.v3+json',
+            'Authorization: token ' . $token,
+            'Content-Type: application/json',
+            'User-Agent: HhOJ-Trigger/1.0',
+        ],
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_err = curl_error($ch);
+    curl_close($ch);
+
+    if ($http_code === 204) {
+        if ($rid > 0) {
+            try {
+                $db = getDB();
+                $upd = $db->prepare("UPDATE judge_runners SET trigger_count = trigger_count + 1, last_triggered_at = NOW(), last_error = '', last_error_at = NULL WHERE id = ?");
+                $upd->execute([$rid]);
+            } catch (Throwable $ignore) {
+                error_log('[triggerSingleJudgeRunner] update stats failed: ' . $ignore->getMessage());
+            }
+        }
+        return ['success' => true, 'message' => "评测机「{$rname}」已触发", 'reason' => '', 'runner_id' => $rid, 'runner_name' => $rname];
+    }
+
+    $body = is_string($response) ? $response : '';
+    $parsed = json_decode($body, true);
+    $ghMessage = is_array($parsed) && isset($parsed['message']) ? (string)$parsed['message'] : '';
+    error_log("[triggerJudge runner={$rname}({$rid})] HTTP={$http_code} curl_err={$curl_err} body={$body}");
+
+    $error_msg = "评测机「{$rname}」触发失败 (HTTP {$http_code})";
+    $reason = 'http_' . $http_code;
+    if ($http_code === 0) {
+        $error_msg = "评测机「{$rname}」网络请求失败：{$curl_err}";
+        $reason = 'network';
+    } elseif ($http_code === 404) {
+        $error_msg .= '：仓库或工作流不存在（owner/repo/workflow 配置错误）';
+        $reason = 'not_found';
+    } elseif ($http_code === 401 || $http_code === 403) {
+        if (stripos($ghMessage, 'lifetime is greater than 366 days') !== false) {
+            $error_msg = "评测机「{$rname}」Token 被组织禁用（有效期超 366 天）";
+            $reason = 'token_expired_org';
+        } elseif (stripos($ghMessage, 'Bad credentials') !== false) {
+            $error_msg = "评测机「{$rname}」Token 已失效或被撤销";
+            $reason = 'token_invalid';
+        } else {
+            $error_msg .= '：Token 无权限（需 Actions: Write）';
+            $reason = 'token_forbidden';
+        }
+    } elseif ($http_code === 422) {
+        $error_msg .= '：工作流无法触发（分支不存在或被禁用）';
+        $reason = 'workflow_disabled';
+    }
+
+    if ($rid > 0) {
+        try {
+            $db = getDB();
+            $upd = $db->prepare("UPDATE judge_runners SET last_error = ?, last_error_at = NOW() WHERE id = ?");
+            $upd->execute([mb_substr($error_msg, 0, 500, 'UTF-8'), $rid]);
+        } catch (Throwable $ignore) {
+            error_log('[triggerSingleJudgeRunner] update last_error failed: ' . $ignore->getMessage());
+        }
+    }
+
+    return ['success' => false, 'message' => $error_msg, 'reason' => $reason, 'runner_id' => $rid, 'runner_name' => $rname];
+}
+
+// 收集所有有效的评测机 API Key（兼容 judge_runners 为空时回退到 site_settings / config.php）
+function collectJudgeApiKeys(): array {
+    $keys = [];
+    try {
+        $runners = getEnabledJudgeRunners();
+        foreach ($runners as $r) {
+            if (!empty($r['api_key'])) {
+                $keys[] = (string)$r['api_key'];
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('[collectJudgeApiKeys] failed: ' . $e->getMessage());
+    }
+    if (empty($keys)) {
+        $cfg = getJudgeConfig();
+        if (!empty($cfg['api_key'])) {
+            $keys[] = $cfg['api_key'];
+        }
+        if (empty($keys) && isset($GLOBALS['api_key']) && $GLOBALS['api_key'] !== '') {
+            $keys[] = (string)$GLOBALS['api_key'];
+        }
+    }
+    return $keys;
+}
+
+// 验证评测机 API Key（时序安全比较）
+function verifyJudgeApiKey(string $provided): bool {
+    if ($provided === '') return false;
+    foreach (collectJudgeApiKeys() as $validKey) {
+        if (hash_equals($validKey, $provided)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 从请求中提取评测机 API Key（X-API-Key 优先，回退 GET ?key）
+function extractJudgeApiKeyFromRequest(): string {
+    if (!empty($_SERVER['HTTP_X_API_KEY']) && is_string($_SERVER['HTTP_X_API_KEY'])) {
+        return (string)$_SERVER['HTTP_X_API_KEY'];
+    }
+    if (isset($_GET['key']) && is_string($_GET['key'])) {
+        return (string)$_GET['key'];
+    }
+    return '';
+}
+
+// 评测机注册表 CRUD
+function getAllJudgeRunners(bool $onlyEnabled = false): array {
+    try {
+        $db = getDB();
+        $sql = "SELECT id, name, priority, enabled, owner, repo, workflow_id, branch, github_token, github_username, api_key, last_triggered_at, last_error, last_error_at, trigger_count, created_at, updated_at FROM judge_runners";
+        if ($onlyEnabled) $sql .= " WHERE enabled = 1";
+        $sql .= " ORDER BY priority ASC, id ASC";
+        $rows = $db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$r) {
+            $r['id'] = (int)$r['id'];
+            $r['priority'] = (int)$r['priority'];
+            $r['enabled'] = (int)$r['enabled'];
+            $r['trigger_count'] = (int)$r['trigger_count'];
+        }
+        return $rows;
+    } catch (Throwable $e) {
+        error_log('[getAllJudgeRunners] failed: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getEnabledJudgeRunners(): array {
+    return getAllJudgeRunners(true);
+}
+
+function getJudgeRunnerById(int $id): ?array {
+    if ($id <= 0) return null;
+    try {
+        $db = getDB();
+        $stmt = $db->prepare("SELECT id, name, priority, enabled, owner, repo, workflow_id, branch, github_token, github_username, api_key, last_triggered_at, last_error, last_error_at, trigger_count, created_at, updated_at FROM judge_runners WHERE id = ?");
+        $stmt->execute([$id]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return null;
+        $row['id'] = (int)$row['id'];
+        $row['priority'] = (int)$row['priority'];
+        $row['enabled'] = (int)$row['enabled'];
+        $row['trigger_count'] = (int)$row['trigger_count'];
+        return $row;
+    } catch (Throwable $e) {
+        error_log('[getJudgeRunnerById] failed: ' . $e->getMessage());
+        return null;
+    }
+}
+
+function addJudgeRunner(string $name, int $priority, bool $enabled, string $owner, string $repo,
+                        string $workflowId, string $branch, string $githubToken, string $githubUsername,
+                        string $apiKey, ?int $createdBy = null) {
+    try {
+        $db = getDB();
+        $stmt = $db->prepare(
+            "INSERT INTO judge_runners (name, priority, enabled, owner, repo, workflow_id, branch, github_token, github_username, api_key, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())"
+        );
+        $ok = $stmt->execute([
+            $name, $priority, $enabled ? 1 : 0, $owner, $repo, $workflowId, $branch,
+            $githubToken, $githubUsername, $apiKey,
+        ]);
+        if (!$ok) return false;
+        $newId = (int)$db->lastInsertId();
+        if ($createdBy !== null) {
+            logAdminAction('add_judge_runner', 'judge_runners', $newId, ['name' => $name, 'priority' => $priority, 'owner' => $owner, 'repo' => $repo], $createdBy);
+        }
+        return $newId;
+    } catch (Throwable $e) {
+        error_log('[addJudgeRunner] ' . $e->getMessage());
+        return false;
+    }
+}
+
+// 更新评测机（github_token / api_key 留空表示不修改）
+function updateJudgeRunner(int $id, string $name, int $priority, bool $enabled, string $owner, string $repo,
+                           string $workflowId, string $branch, string $githubToken, string $githubUsername,
+                           string $apiKey, ?int $updatedBy = null): bool {
+    try {
+        $db = getDB();
+        if ($githubToken !== '' && $apiKey !== '') {
+            $stmt = $db->prepare(
+                "UPDATE judge_runners SET name=?, priority=?, enabled=?, owner=?, repo=?, workflow_id=?, branch=?, github_token=?, github_username=?, api_key=? WHERE id=?"
+            );
+            $ok = $stmt->execute([$name, $priority, $enabled ? 1 : 0, $owner, $repo, $workflowId, $branch, $githubToken, $githubUsername, $apiKey, $id]);
+        } elseif ($githubToken !== '' && $apiKey === '') {
+            $stmt = $db->prepare(
+                "UPDATE judge_runners SET name=?, priority=?, enabled=?, owner=?, repo=?, workflow_id=?, branch=?, github_token=?, github_username=? WHERE id=?"
+            );
+            $ok = $stmt->execute([$name, $priority, $enabled ? 1 : 0, $owner, $repo, $workflowId, $branch, $githubToken, $githubUsername, $id]);
+        } elseif ($githubToken === '' && $apiKey !== '') {
+            $stmt = $db->prepare(
+                "UPDATE judge_runners SET name=?, priority=?, enabled=?, owner=?, repo=?, workflow_id=?, branch=?, github_username=?, api_key=? WHERE id=?"
+            );
+            $ok = $stmt->execute([$name, $priority, $enabled ? 1 : 0, $owner, $repo, $workflowId, $branch, $githubUsername, $apiKey, $id]);
+        } else {
+            $stmt = $db->prepare(
+                "UPDATE judge_runners SET name=?, priority=?, enabled=?, owner=?, repo=?, workflow_id=?, branch=?, github_username=? WHERE id=?"
+            );
+            $ok = $stmt->execute([$name, $priority, $enabled ? 1 : 0, $owner, $repo, $workflowId, $branch, $githubUsername, $id]);
+        }
+        if ($ok && $updatedBy !== null) {
+            logAdminAction('update_judge_runner', 'judge_runners', $id, ['name' => $name, 'priority' => $priority], $updatedBy);
+        }
+        return $ok;
+    } catch (Throwable $e) {
+        error_log('[updateJudgeRunner] ' . $e->getMessage());
+        return false;
+    }
+}
+
+function deleteJudgeRunner(int $id, ?int $deletedBy = null): bool {
+    try {
+        $db = getDB();
+        $row = getJudgeRunnerById($id);
+        $stmt = $db->prepare("DELETE FROM judge_runners WHERE id = ?");
+        $ok = $stmt->execute([$id]);
+        if ($ok && $deletedBy !== null && $row) {
+            logAdminAction('delete_judge_runner', 'judge_runners', $id, ['name' => $row['name']], $deletedBy);
+        }
+        return $ok && $stmt->rowCount() > 0;
+    } catch (Throwable $e) {
+        error_log('[deleteJudgeRunner] ' . $e->getMessage());
+        return false;
+    }
+}
+
+// 评测机连接测试（指定 ID，不触发 workflow）
+function testJudgeRunnerConnection(int $runnerId): array {
+    $runner = getJudgeRunnerById($runnerId);
+    if ($runner === null) {
+        return ['success' => false, 'http_code' => 0, 'message' => "评测机 #{$runnerId} 不存在"];
+    }
+    if (empty($runner['github_token'])) {
+        return ['success' => false, 'http_code' => 0, 'message' => "评测机「{$runner['name']}」未配置 Token"];
+    }
+    if (!function_exists('curl_init')) {
+        return ['success' => false, 'http_code' => 0, 'message' => '服务器未启用 cURL'];
+    }
+    $url = "https://api.github.com/repos/{$runner['owner']}/{$runner['repo']}";
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['success' => false, 'http_code' => 0, 'message' => '无法初始化 cURL'];
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/vnd.github.v3+json',
+            'Authorization: token ' . $runner['github_token'],
+            'User-Agent: HhOJ-Test/1.0',
+        ],
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $http_code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_err = curl_error($ch);
+    curl_close($ch);
+
+    $rname = $runner['name'];
+    if ($http_code === 200) {
+        return ['success' => true, 'http_code' => 200, 'message' => "评测机「{$rname}」连接成功，Token 可访问该仓库"];
+    }
+    $body = is_string($response) ? $response : '';
+    $parsed = json_decode($body, true);
+    $ghMsg = is_array($parsed) && isset($parsed['message']) ? (string)$parsed['message'] : '';
+    $msg = "评测机「{$rname}」HTTP {$http_code}";
+    if ($http_code === 0) {
+        $msg = "评测机「{$rname}」网络请求失败：{$curl_err}";
+    } elseif ($http_code === 404) {
+        $msg = "评测机「{$rname}」仓库不存在或 Token 无权限";
+    } elseif ($http_code === 401) {
+        $msg = "评测机「{$rname}」Token 无效（Bad credentials）";
+    } elseif ($http_code === 403) {
+        if (stripos($ghMsg, 'lifetime is greater than 366 days') !== false) {
+            $msg = "评测机「{$rname}」Token 被组织禁用（有效期超 366 天）";
+        } else {
+            $msg = "评测机「{$rname}」Token 权限不足：{$ghMsg}";
+        }
+    } elseif ($ghMsg) {
+        $msg .= "：{$ghMsg}";
+    }
+    return ['success' => false, 'http_code' => $http_code, 'message' => $msg];
+}
+
+// 评测机连接诊断（管理员查看用）
+function diagnoseJudgeService(): array {
+    $cfg = getJudgeConfig();
+    $allRunners = getAllJudgeRunners(false);
+    $enabledRunners = array_filter($allRunners, function ($r) { return $r['enabled'] == 1; });
+    $result = [
+        'github_token_configured' => !empty($cfg['github_token']),
+        'api_key_configured'      => !empty($cfg['api_key']),
+        'curl_available'          => function_exists('curl_init'),
+        'trigger_http_code'       => 0,
+        'trigger_message'         => '',
+        'pending_count'           => 0,
+        'oldest_pending_age'      => null,
+        'config'                  => $cfg,
+        'runners'                 => $allRunners,
+        'enabled_runners_count'   => count($enabledRunners),
+    ];
+    try {
+        $db = getDB();
+        $cnt = (int)$db->query("SELECT COUNT(*) FROM problem_submissions WHERE status = 'pending'")->fetchColumn();
+        $result['pending_count'] = $cnt;
+        if ($cnt > 0) {
+            $oldest = $db->query("SELECT TIMESTAMPDIFF(MINUTE, created_at, NOW()) AS age FROM problem_submissions WHERE status = 'pending' ORDER BY id ASC LIMIT 1")->fetchColumn();
+            $result['oldest_pending_age'] = $oldest !== false ? (int)$oldest : null;
+        }
+    } catch (Throwable $e) {
+        error_log('[diagnoseJudgeService] failed: ' . $e->getMessage());
+        $result['pending_count'] = -1;
+    }
+    $canTrigger = (count($enabledRunners) > 0) || ($result['github_token_configured'] && $result['api_key_configured']);
+    if ($canTrigger && $result['curl_available']) {
+        $r = triggerJudge();
+        $result['trigger_message'] = $r['message'];
+        $reasonMap = [
+            'config_missing'      => '配置缺失',
+            'no_curl'             => '无 cURL',
+            'network'             => '网络失败',
+            'not_found'           => '仓库/工作流不存在',
+            'token_invalid'       => 'Token 失效',
+            'token_expired_org'   => 'Token 被组织禁用（有效期超 366 天）',
+            'token_forbidden'     => 'Token 无权限',
+            'workflow_disabled'   => '工作流被禁用',
+            'all_runners_failed'  => '所有评测机均失败',
+        ];
+        $result['trigger_http_code'] = $r['success'] ? 204 : ($reasonMap[$r['reason']] ?? $r['reason']);
+    } else {
+        $result['trigger_message'] = count($enabledRunners) === 0 ? '无启用的评测机' : '配置不完整，无法触发';
+    }
+    return $result;
+}
+
+// 重试触发所有 pending 提交的评测（评测机掉线后管理员手动恢复）
+function retryPendingJudge(): array {
+    $r = triggerJudge();
+    if ($r['success']) {
+        return ['triggered' => 1, 'failed' => 0, 'message' => '评测机已重新触发，pending 提交将在数秒内开始评测'];
+    }
+    return ['triggered' => 0, 'failed' => 1, 'message' => $r['message']];
+}
