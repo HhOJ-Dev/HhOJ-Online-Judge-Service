@@ -1,12 +1,16 @@
 # HhOJ Judge Environment
 # 预装所有评测所需编译器和依赖，消除每次 Actions 运行时的安装时间
-# 构建并推送到 Docker Hub:
-#   docker build -f Dockerfile.judge -t hhoj/judge-env:latest .
-#   docker push hhoj/judge-env:latest
+# 构建并推送到 ghcr.io:
+#   docker build -f Dockerfile.judge -t ghcr.io/hhoj-dev/judge-env:latest .
+#   docker push ghcr.io/hhoj-dev/judge-env:latest
 
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# 使用清华镜像加速
+RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
 
 # 预装所有编译器和工具链
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,11 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fp-compiler \
     curl \
     jq \
+    git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 预装 Python 依赖
-RUN pip3 install --no-cache-dir requests pycryptodome
+RUN pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple requests pycryptodome
 
 # 验证所有编译器可用
 RUN echo "Verifying compilers..." \

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from runners import _make_preexec
 
 class JavaRunner:
     def __init__(self):
@@ -41,11 +42,13 @@ class JavaRunner:
                  open(err_path, 'w', encoding='utf-8') as ferr:
 
                 start_time = time.time()
+                preexec = _make_preexec(memory_limit_kb)
                 proc = subprocess.Popen(
                     ['java', '-cp', sub_dir, 'Main'],
                     stdin=fin,
                     stdout=fout,
-                    stderr=ferr
+                    stderr=ferr,
+                    preexec_fn=preexec
                 )
 
                 try:
@@ -57,6 +60,8 @@ class JavaRunner:
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
 
+                if proc.returncode == -9:
+                    return 'MLE', elapsed_ms, 0
                 if proc.returncode != 0:
                     return 'RE', elapsed_ms, 0
 

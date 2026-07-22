@@ -5,141 +5,46 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   judge:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/hhoj-dev/judge-env:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Cache Pip Packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('blankend/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install Python Dependencies
-        run: |
-          echo "Installing compilers and dependencies..."
-          sudo apt-get update -y
-          sudo apt-get install -y g++ gcc default-jdk python3 python3-pip mono-complete fp-compiler curl jq
-          pip3 install --cache-dir ~/.cache/pip -r blankend/requirements.txt
-
-      - name: Validate Secrets
+      - name: Run Judge
+        id: judge
         run: |
           if [ -z "${{ secrets.HHOJ_API_KEY }}" ]; then
-            echo "::error::HHOJ_API_KEY secret is not configured"
-            exit 1
+            echo "::error::HHOJ_API_KEY not configured" && exit 1
           fi
           if [ -z "${{ secrets.HHOJ_HOST }}" ]; then
-            echo "::error::HHOJ_HOST secret is not configured"
-            exit 1
+            echo "::error::HHOJ_HOST not configured" && exit 1
           fi
           HOST="${{ secrets.HHOJ_HOST }}"
           HOST="${HOST%/}"
-          echo "HOST=$HOST" >> $GITHUB_ENV
+          bash blankend/judge_all.sh "$HOST" "${{ secrets.HHOJ_API_KEY }}"
 
-      - name: Fetch Submissions from API
-        id: fetch
-        run: |
-          echo "Fetching pending submissions..."
-
-          python3 blankend/fetch_submissions.py \
-            --host "$HOST" \
-            --api-key "${{ secrets.HHOJ_API_KEY }}" \
-            --output submissions.json \
-            --batch 1 \
-            --inline-testcases 1
-
-          if [ ! -f submissions.json ]; then
-            echo "::error::Failed to fetch submissions"
-            exit 1
-          fi
-
-          SUCCESS=$(cat submissions.json | jq -r '.success' 2>/dev/null || echo "false")
-          if [ "$SUCCESS" != "true" ]; then
-            MSG=$(cat submissions.json | jq -r '.message' 2>/dev/null || echo "Unknown error")
-            echo "::error::API error: $MSG"
-            exit 1
-          fi
-
-          COUNT=$(cat submissions.json | jq '.submissions | length' 2>/dev/null || echo "0")
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Submissions fetched: $COUNT"
-
-      # g++ and gcc are pre-installed on ubuntu-latest.
-      # Only install extra compilers that submissions actually need.
-      - name: Install Compilers (On-Demand)
-        if: steps.fetch.outputs.count > 0
-        run: |
-          # Extract all languages from submissions
-          LANGS=$(cat submissions.json | jq -r '.submissions[].language' | sort -u)
-          echo "Languages in submissions: $LANGS"
-
-          APT_PKGS=""
-          for lang in $LANGS; do
-            case "$lang" in
-              c|cpp|cpp11|cpp11_o2|cpp14|cpp14_o2|cpp17|cpp17_o2|cpp23|cpp23_o2)
-                # g++ and gcc are pre-installed
-                ;;
-              java)
-                APT_PKGS="$APT_PKGS default-jdk"
-                ;;
-              csharp)
-                APT_PKGS="$APT_PKGS mono-complete"
-                ;;
-              pascal)
-                APT_PKGS="$APT_PKGS fp-compiler"
-                ;;
-              python|python3)
-                # python3 is pre-installed
-                ;;
-            esac
-          done
-
-          if [ -n "$APT_PKGS" ]; then
-            echo "Installing: $APT_PKGS"
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends $APT_PKGS
-          else
-            echo "No extra compilers needed (g++/gcc/python3 pre-installed)"
-          fi
-
-      - name: Process Submissions
-        if: steps.fetch.outputs.count > 0
-        run: |
-          cd blankend
-          python3 judge.py \
-            --api-key "${{ secrets.HHOJ_API_KEY }}" \
-            --site-url "$HOST" \
-            --submissions ../submissions.json \
-            --work-dir ../judge_work
-
-      - name: No Pending Submissions
-        if: steps.fetch.outputs.count == 0
-        run: |
-          echo "No pending submissions to judge"
-          echo '{"status":"skip","message":"No pending submissions"}' > judge_result.json
-          echo "SKIP" > status.txt
-          echo "## HhOJ Judge Result" > summary.md
-          echo "" >> summary.md
-          echo "**Status**: No pending submissions" >> summary.md
-
-      - name: Generate Summary Report
+      - name: Summary
         if: always()
         run: |
           if [ -f summary.md ]; then
             cat summary.md >> $GITHUB_STEP_SUMMARY
           else
-            echo "## HhOJ Judge Result" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Verdict**: Unknown Error (UKE)" >> $GITHUB_STEP_SUMMARY
+            printf "## HhOJ Judge Result\n\n**Verdict**: Unknown Error (UKE)\n" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload Artifacts
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@v5
         with:
