@@ -360,6 +360,7 @@ def main():
     results = []
     for submission in submissions:
         sub_id = submission['id']
+        code = submission.get('code', '')
         print(f"[{sub_id}] Judging {submission.get('language', 'unknown')}...")
         print(f"[{sub_id}] Code preview: {repr(code[:200])}", file=sys.stderr)
         try:
