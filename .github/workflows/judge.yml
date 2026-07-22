@@ -22,46 +22,38 @@ jobs:
       HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
       HHOJ_HOST: ${{ secrets.HHOJ_HOST }}
     steps:
-      - name: Checkout & Run
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            blankend
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: blankend/requirements.txt
+
+      - name: Install deps & Run
         run: |
           set -euo pipefail
-          
           if [ -z "$HHOJ_API_KEY" ] || [ -z "$HHOJ_HOST" ]; then
-            echo "::error::Secrets not configured"
-            exit 1
+            echo "::error::Secrets not configured" && exit 1
           fi
-          
           START=$(date +%s%N)
-          
-          cd /tmp
-          rm -rf hhoj-judge
-          git clone --depth=1 --sparse https://github.com/HhOJ-Dev/HhOJ-Online-Judge-Service.git hhoj-judge
-          cd hhoj-judge
-          git sparse-checkout set blankend
-          
-          echo "Checkout: $((($(date +%s%N) - START)/1000000))ms"
-          
-          pip install -q requests pycryptodome
-          
+          pip install -q -r blankend/requirements.txt
           echo "Pip: $((($(date +%s%N) - START)/1000000))ms"
-          
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc g++ >/dev/null
-          
-          echo "Compiler: $((($(date +%s%N) - START)/1000000))ms"
-          
+          # gcc/g++ already preinstalled on ubuntu-latest; Java/C#/Pascal installed on-demand by judge_all.sh
           HOST="${HHOJ_HOST%/}"
           bash blankend/judge_all.sh "$HOST"
-          
           echo "Total: $((($(date +%s%N) - START)/1000000))ms"
-          
-          cp status.txt judge_result.json submissions.json summary.md /tmp/ || true
 
       - name: Summary
         if: always()
         run: |
-          if [ -f /tmp/summary.md ]; then
-            cat /tmp/summary.md >> $GITHUB_STEP_SUMMARY
+          if [ -f summary.md ]; then
+            cat summary.md >> $GITHUB_STEP_SUMMARY
           else
             printf "## HhOJ Judge Result\n\n**Verdict**: Unknown Error (UKE)\n" >> $GITHUB_STEP_SUMMARY
           fi
@@ -72,8 +64,8 @@ jobs:
         with:
           name: judge-results
           path: |
-            /tmp/status.txt
-            /tmp/judge_result.json
-            /tmp/submissions.json
-            /tmp/summary.md
+            status.txt
+            judge_result.json
+            submissions.json
+            summary.md
           if-no-files-found: ignore
