@@ -1,12 +1,10 @@
-name: HhOJ Online Judge
+name: HhOJ Online Judge (Worker 3)
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
   schedule:
-    # Worker 1: 分钟 0,5,10,15... (每5分钟)
-    - cron: '0/5 * * * *'
+    # Worker 3: 分钟 4,9,14,19... (与 Worker 1/2 错开)
+    - cron: '4/5 * * * *'
 
 permissions:
   contents: read
@@ -51,7 +49,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: judge-results
+          name: judge-results-w3
           path: |
             status.txt
             judge_result.json
