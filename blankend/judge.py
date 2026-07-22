@@ -5,9 +5,7 @@ import sys
 import json
 import base64
 import argparse
-import tempfile
 import hashlib
-import time
 import re
 import requests
 from urllib.parse import urlparse
@@ -48,59 +46,38 @@ def compare_output(user_out_path, expected_out_path):
         while expected_lines and expected_lines[-1].rstrip() == '':
             expected_lines.pop()
 
-        if len(user_lines) != len(expected_lines):
-            return False
-
-        for u, e in zip(user_lines, expected_lines):
-            if u.rstrip() != e.rstrip():
-                return False
-
-        return True
+        return user_lines == expected_lines
     except Exception:
         return False
 
 
 def solve_infinitree_challenge(html_text):
-    """Parse and solve InfinityFree's JavaScript AES challenge."""
     from Crypto.Cipher import AES
     numbers = re.findall(r'toNumbers\("([a-f0-9]{32})"\)', html_text)
     if len(numbers) < 3:
         return None
-
-    a = bytes.fromhex(numbers[0])  # key
-    b = bytes.fromhex(numbers[1])  # IV
-    c = bytes.fromhex(numbers[2])  # ciphertext
-
-    # Try CBC first (most common for InfinityFree)
+    a = bytes.fromhex(numbers[0])
+    b = bytes.fromhex(numbers[1])
+    c = bytes.fromhex(numbers[2])
     try:
-        cipher = AES.new(a, AES.MODE_CBC, b)
-        decrypted = cipher.decrypt(c)
-        return decrypted.hex()
+        return AES.new(a, AES.MODE_CBC, b).decrypt(c).hex()
     except Exception:
         pass
-
-    # Try ECB as fallback
     try:
-        cipher = AES.new(a, AES.MODE_ECB)
-        decrypted = cipher.decrypt(c)
-        return decrypted.hex()
+        return AES.new(a, AES.MODE_ECB).decrypt(c).hex()
     except Exception:
         pass
-
     return None
 
 
 def create_api_session(host, api_key):
-    """Create a requests session with InfinityFree challenge handling."""
     session = requests.Session()
     session.headers.update({
         'X-API-Key': api_key,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36'
     })
-
-    # Pre-fetch to solve InfinityFree JavaScript challenge
     try:
-        response = session.get(host, timeout=30, allow_redirects=True)
+        response = session.get(host, timeout=5, allow_redirects=True)
         if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
             cookie_value = solve_infinitree_challenge(response.text)
             if cookie_value:
@@ -108,21 +85,19 @@ def create_api_session(host, api_key):
                 session.cookies.set('__test', cookie_value, domain=domain)
     except Exception:
         pass
-
     return session
 
 
 def download_testcase(url, session, cache_dir):
     url_hash = hashlib.md5(url.encode()).hexdigest()
     cache_path = os.path.join(cache_dir, url_hash)
-
     if os.path.exists(cache_path):
         return cache_path
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            response = session.get(url, timeout=30, allow_redirects=True)
-            is_html = 'text/html' in response.headers.get('content-type', '') or response.text.strip().startswith('<html') or response.text.strip().startswith('<!DOCTYPE')
+            response = session.get(url, timeout=10, allow_redirects=True)
+            is_html = 'text/html' in response.headers.get('content-type', '') or response.text.strip().startswith('<html')
 
             if is_html:
                 cookie_value = solve_infinitree_challenge(response.text)
@@ -130,32 +105,16 @@ def download_testcase(url, session, cache_dir):
                     domain = urlparse(url).hostname or ''
                     session.cookies.set('__test', cookie_value, domain=domain)
                     session.headers['Cookie'] = f'__test={cookie_value}'
-                    # Follow redirect in challenge HTML if present
-                    redirect_match = re.search(r'location\.href="([^"]+)"', response.text)
-                    if redirect_match:
-                        redirect_url = redirect_match.group(1)
-                        if redirect_url.startswith('/'):
-                            parsed = urlparse(url)
-                            redirect_url = f"{parsed.scheme}://{parsed.netloc}{redirect_url}"
-                        url = redirect_url
-                    print(f"  [Download] Attempt {attempt+1}: solved InfinityFree challenge, retrying", file=sys.stderr)
-                    continue
-                else:
-                    print(f"  [Download] Attempt {attempt+1}: got HTML but failed to solve challenge (status={response.status_code})", file=sys.stderr)
                     continue
 
             if response.status_code == 200:
                 os.makedirs(cache_dir, exist_ok=True)
                 with open(cache_path, 'wb') as f:
                     f.write(response.content)
-                print(f"  [Download] Saved testcase ({len(response.content)} bytes)", file=sys.stderr)
                 return cache_path
-            else:
-                print(f"  [Download] Attempt {attempt+1}: HTTP {response.status_code}", file=sys.stderr)
-        except Exception as e:
-            print(f"  [Download] Attempt {attempt+1}: {e}", file=sys.stderr)
+        except Exception:
+            continue
 
-    print(f"  [Download] Failed to download after 3 attempts: {url}", file=sys.stderr)
     return None
 
 
@@ -163,24 +122,17 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
     in_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.in")
     out_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.out")
 
-    print(f"  [TC {tc.get('id')}] inlined={tc.get('inlined')}, has_input_data={bool(tc.get('input_data'))}, has_output_data={bool(tc.get('output_data'))}", file=sys.stderr)
-
-    if tc.get('inlined'):
-        if tc.get('input_data') and tc.get('output_data'):
-            try:
-                input_decoded = base64.b64decode(tc['input_data'])
-                output_decoded = base64.b64decode(tc['output_data'])
-                print(f"  [TC {tc.get('id')}] Decoded input: {repr(input_decoded[:100])}, output: {repr(output_decoded[:100])}", file=sys.stderr)
-                
-                with open(in_path, 'wb') as f:
-                    f.write(input_decoded)
-                with open(out_path, 'wb') as f:
-                    f.write(output_decoded)
-                return in_path, out_path
-            except Exception as e:
-                print(f"  [TC {tc.get('id')}] Base64 decode error: {e}", file=sys.stderr)
-        else:
-            print(f"  [TC {tc.get('id')}] Missing input_data or output_data", file=sys.stderr)
+    if tc.get('inlined') and tc.get('input_data') and tc.get('output_data'):
+        try:
+            input_decoded = base64.b64decode(tc['input_data'])
+            output_decoded = base64.b64decode(tc['output_data'])
+            with open(in_path, 'wb') as f:
+                f.write(input_decoded)
+            with open(out_path, 'wb') as f:
+                f.write(output_decoded)
+            return in_path, out_path
+        except Exception:
+            pass
 
     if tc.get('input_url') and tc.get('output_url'):
         downloaded_in = download_testcase(tc['input_url'], session, cache_dir)
@@ -219,7 +171,7 @@ def judge_submission(submission, work_dir, session):
 
     if not code:
         result['status'] = RESULT_CE
-        result['error_message'] = 'Empty or missing source code'
+        result['error_message'] = 'Empty source code'
         return result
 
     try:
@@ -247,70 +199,41 @@ def judge_submission(submission, work_dir, session):
 
     for tc in testcases:
         if stopped_early:
-            result['testcases'].append({
-                'id': tc.get('id'),
-                'status': 'skipped',
-                'time_used': 0,
-                'memory_used': 0
-            })
+            result['testcases'].append({'id': tc.get('id'), 'status': 'skipped', 'time_used': 0, 'memory_used': 0})
             continue
 
         in_path, out_path = prepare_testcase(tc, sub_dir, session, cache_dir)
         if not in_path or not out_path:
-            tc_result = {
-                'id': tc.get('id'),
-                'status': RESULT_UKE,
-                'time_used': 0,
-                'memory_used': 0
-            }
-            result['testcases'].append(tc_result)
+            result['testcases'].append({'id': tc.get('id'), 'status': RESULT_UKE, 'time_used': 0, 'memory_used': 0})
             final_status = RESULT_UKE
             break
 
-        run_status, time_used, memory_used = runner.run(
-            sub_dir, in_path, time_limit, memory_limit * 1024
-        )
+        run_status, time_used, memory_used = runner.run(sub_dir, in_path, time_limit, memory_limit * 1024)
 
-        tc_result = {
-            'id': tc.get('id'),
-            'status': run_status,
-            'time_used': time_used,
-            'memory_used': memory_used
-        }
+        tc_result = {'id': tc.get('id'), 'status': run_status, 'time_used': time_used, 'memory_used': memory_used}
 
         if run_status == 'OK':
             user_out = os.path.join(sub_dir, 'user.out')
             if compare_output(user_out, out_path):
                 tc_result['status'] = RESULT_AC
-                tc_score = tc.get('score', 10)
-                total_score += tc_score
+                total_score += tc.get('score', 10)
             else:
                 tc_result['status'] = RESULT_WA
                 final_status = RESULT_WA
-        elif run_status == RESULT_TLE:
-            final_status = RESULT_TLE
-            stopped_early = True
-        elif run_status == RESULT_MLE:
-            final_status = RESULT_MLE
-            stopped_early = True
-        elif run_status == RESULT_RE:
-            final_status = RESULT_RE
+        elif run_status in (RESULT_TLE, RESULT_MLE, RESULT_RE):
+            final_status = run_status
+            if run_status in (RESULT_TLE, RESULT_MLE):
+                stopped_early = True
 
         max_time = max(max_time, time_used)
         max_memory = max(max_memory, memory_used)
-
         result['testcases'].append(tc_result)
 
     if final_status == RESULT_AC and total_score < max_score:
         final_status = RESULT_WA
 
-    if final_status == RESULT_AC:
-        score = 100
-    else:
-        score = int(total_score * 100 / max_score) if max_score > 0 else 0
-
     result['status'] = final_status
-    result['score'] = score
+    result['score'] = 100 if final_status == RESULT_AC else (int(total_score * 100 / max_score) if max_score > 0 else 0)
     result['time_used'] = max_time
     result['memory_used'] = max_memory
 
@@ -325,7 +248,6 @@ def judge_submission(submission, work_dir, session):
 
 def report_results(session, site_url, results):
     url = f"{site_url}/api/judge_report.php"
-
     hhoj_results = []
     for r in results:
         hhoj_results.append({
@@ -337,32 +259,27 @@ def report_results(session, site_url, results):
             'error_message': r.get('error_message', '')[:5000]
         })
 
-    payload = {'results': hhoj_results}
-
     try:
-        response = session.post(url, json=payload, timeout=30)
-        # Handle InfinityFree challenge on POST too
+        response = session.post(url, json={'results': hhoj_results}, timeout=10)
         if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
             cookie_value = solve_infinitree_challenge(response.text)
             if cookie_value:
                 domain = urlparse(site_url).hostname or ''
                 session.cookies.set('__test', cookie_value, domain=domain)
-                response = session.post(url, json=payload, timeout=30)
+                response = session.post(url, json={'results': hhoj_results}, timeout=10)
         return response.status_code == 200, response.text
     except Exception as e:
         return False, str(e)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='HhOJ Judge Script v3.0')
-    parser.add_argument('--api-key', default=os.environ.get('HHOJ_API_KEY', ''),
-                        help='API key (or set HHOJ_API_KEY env var)')
+    parser = argparse.ArgumentParser(description='HhOJ Judge Script')
+    parser.add_argument('--api-key', default=os.environ.get('HHOJ_API_KEY', ''), help='API key')
     parser.add_argument('--site-url', required=True, help='HhOJ site URL')
-    parser.add_argument('--submissions', required=True, help='Path to submissions JSON file')
+    parser.add_argument('--submissions', required=True, help='Submissions JSON file')
     parser.add_argument('--work-dir', default='./judge_work', help='Working directory')
 
     args = parser.parse_args()
-
     site_url = args.site_url.rstrip('/')
     work_dir = os.path.abspath(args.work_dir)
     os.makedirs(work_dir, exist_ok=True)
@@ -377,21 +294,18 @@ def main():
     submissions = data.get('submissions', [])
     print(f"Loaded {len(submissions)} submissions")
 
-    # Create session with InfinityFree challenge handling
     session = create_api_session(site_url, args.api_key)
 
     results = []
     for submission in submissions:
         sub_id = submission.get('id', 'unknown')
-        print(f"[{sub_id}] Judging {submission.get('language', 'unknown')}...")
+        print(f"[{sub_id}] Judging...")
         try:
             result = judge_submission(submission, work_dir, session)
             results.append(result)
-            print(f"[{sub_id}] Result: {result['status']} (score: {result['score']}, time: {result['time_used']}ms)")
+            print(f"[{sub_id}] {result['status']} ({result['score']}/100, {result['time_used']}ms)")
         except Exception as e:
-            import traceback
             print(f"[{sub_id}] Error: {e}", file=sys.stderr)
-            traceback.print_exc()
             results.append({
                 'submission_id': sub_id,
                 'status': RESULT_UKE,
@@ -402,12 +316,9 @@ def main():
             })
 
     if results:
-        print(f"Reporting {len(results)} results to {site_url}...")
+        print(f"Reporting {len(results)} results...")
         ok, msg = report_results(session, site_url, results)
-        if ok:
-            print("Report successful")
-        else:
-            print(f"Report failed: {msg}", file=sys.stderr)
+        print("Report OK" if ok else f"Report failed: {msg}")
 
     result_file = os.path.join(os.path.dirname(args.submissions), 'judge_result.json')
     with open(result_file, 'w', encoding='utf-8') as f:
