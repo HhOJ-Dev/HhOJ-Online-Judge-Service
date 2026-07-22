@@ -1,7 +1,6 @@
 import os
 import subprocess
-import time
-from runners._common import make_preexec
+from runners._common import run_sandboxed
 
 class CSharpRunner:
     def __init__(self):
@@ -49,39 +48,7 @@ class CSharpRunner:
         exe_path = os.path.join(sub_dir, 'main.exe')
         out_path = os.path.join(sub_dir, 'user.out')
         err_path = os.path.join(sub_dir, 'user.err')
-
-        time_limit_s = time_limit_ms / 1000.0
-
-        try:
-            with open(in_path, 'r', encoding='utf-8') as fin, \
-                 open(out_path, 'w', encoding='utf-8') as fout, \
-                 open(err_path, 'w', encoding='utf-8') as ferr:
-
-                start_time = time.time()
-                preexec = make_preexec(memory_limit_kb)
-                proc = subprocess.Popen(
-                    ['mono', exe_path],
-                    stdin=fin,
-                    stdout=fout,
-                    stderr=ferr,
-                    preexec_fn=preexec
-                )
-
-                try:
-                    proc.wait(timeout=time_limit_s)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    return 'TLE', 0, 0
-
-                elapsed_ms = int((time.time() - start_time) * 1000)
-
-                if proc.returncode == -9:
-                    return 'MLE', elapsed_ms, 0
-                if proc.returncode != 0:
-                    return 'RE', elapsed_ms, 0
-
-                return 'OK', elapsed_ms, 0
-
-        except Exception as e:
-            return 'RE', 0, 0
+        # Mono reserves large virtual address space; use RLIMIT_DATA with 2x overhead
+        adjusted_limit = memory_limit_kb * 2 if memory_limit_kb > 0 else 0
+        return run_sandboxed(['mono', exe_path], in_path, out_path, err_path,
+                             time_limit_ms, adjusted_limit, use_rlimit_as=False)

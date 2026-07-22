@@ -35,10 +35,13 @@ STATUS_TO_HHOJ = {
 
 def compare_output(user_out_path, expected_out_path):
     try:
-        with open(user_out_path, 'r', encoding='utf-8', errors='ignore') as f:
-            user_lines = f.read().splitlines()
-        with open(expected_out_path, 'r', encoding='utf-8', errors='ignore') as f:
-            expected_lines = f.read().splitlines()
+        with open(user_out_path, 'rb') as f:
+            user_data = f.read()
+        with open(expected_out_path, 'rb') as f:
+            expected_data = f.read()
+
+        user_lines = user_data.decode('utf-8', errors='surrogateescape').splitlines()
+        expected_lines = expected_data.decode('utf-8', errors='surrogateescape').splitlines()
 
         while user_lines and user_lines[-1].rstrip() == '':
             user_lines.pop()
@@ -342,7 +345,7 @@ def report_results(session, site_url, results):
         if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
             cookie_value = solve_infinitree_challenge(response.text)
             if cookie_value:
-                domain = site_url.split('/')[2] if '://' in site_url else ''
+                domain = urlparse(site_url).hostname or ''
                 session.cookies.set('__test', cookie_value, domain=domain)
                 response = session.post(url, json=payload, timeout=30)
         return response.status_code == 200, response.text
@@ -352,7 +355,8 @@ def report_results(session, site_url, results):
 
 def main():
     parser = argparse.ArgumentParser(description='HhOJ Judge Script v3.0')
-    parser.add_argument('--api-key', required=True, help='API key')
+    parser.add_argument('--api-key', default=os.environ.get('HHOJ_API_KEY', ''),
+                        help='API key (or set HHOJ_API_KEY env var)')
     parser.add_argument('--site-url', required=True, help='HhOJ site URL')
     parser.add_argument('--submissions', required=True, help='Path to submissions JSON file')
     parser.add_argument('--work-dir', default='./judge_work', help='Working directory')
@@ -378,7 +382,7 @@ def main():
 
     results = []
     for submission in submissions:
-        sub_id = submission['id']
+        sub_id = submission.get('id', 'unknown')
         print(f"[{sub_id}] Judging {submission.get('language', 'unknown')}...")
         try:
             result = judge_submission(submission, work_dir, session)

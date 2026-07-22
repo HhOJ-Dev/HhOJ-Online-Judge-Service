@@ -4,6 +4,7 @@ Fetch submissions from HhOJ API, handling InfinityFree's JavaScript anti-bot cha
 """
 
 import sys
+import os
 import re
 import requests
 from Crypto.Cipher import AES
@@ -124,7 +125,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fetch submissions from HhOJ API')
     parser.add_argument('--host', required=True, help='HhOJ site URL')
-    parser.add_argument('--api-key', required=True, help='API key')
+    parser.add_argument('--api-key', default=os.environ.get('HHOJ_API_KEY', ''),
+                        help='API key (or set HHOJ_API_KEY env var)')
     parser.add_argument('--output', default='submissions.json', help='Output file path')
     parser.add_argument('--batch', type=int, default=1, help='Batch size')
     parser.add_argument('--inline-testcases', type=int, default=1, help='Inline testcases')

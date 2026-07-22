@@ -10,9 +10,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: judge-worker-1
+  cancel-in-progress: true
+
 jobs:
   judge:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
+      HHOJ_HOST: ${{ secrets.HHOJ_HOST }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -28,19 +36,18 @@ jobs:
           cache-dependency-path: blankend/requirements.txt
 
       - name: Install deps
-        run: pip install -r blankend/requirements.txt
+        run: pip install -q -r blankend/requirements.txt
 
       - name: Run Judge
         run: |
-          if [ -z "${{ secrets.HHOJ_API_KEY }}" ]; then
+          if [ -z "$HHOJ_API_KEY" ]; then
             echo "::error::HHOJ_API_KEY not configured" && exit 1
           fi
-          if [ -z "${{ secrets.HHOJ_HOST }}" ]; then
+          if [ -z "$HHOJ_HOST" ]; then
             echo "::error::HHOJ_HOST not configured" && exit 1
           fi
-          HOST="${{ secrets.HHOJ_HOST }}"
-          HOST="${HOST%/}"
-          bash blankend/judge_all.sh "$HOST" "${{ secrets.HHOJ_API_KEY }}"
+          HOST="${HHOJ_HOST%/}"
+          bash blankend/judge_all.sh "$HOST"
 
       - name: Summary
         if: always()
