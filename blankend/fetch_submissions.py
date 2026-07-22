@@ -158,6 +158,11 @@ def main():
         if data.get('success'):
             count = len(data.get('submissions', []))
             print(f"Successfully fetched {count} submissions")
+            
+            for idx, sub in enumerate(data.get('submissions', [])):
+                code = sub.get('code', '')
+                if not code or len(code) < 10:
+                    print(f"WARNING: Submission #{sub.get('id', idx)} has suspicious code (length={len(code)}): {repr(code[:50])}", file=sys.stderr)
         else:
             print(f"API error: {data.get('message', 'Unknown error')}", file=sys.stderr)
             sys.exit(1)

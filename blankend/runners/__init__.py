@@ -1,3 +1,4 @@
+from runners._common import make_preexec
 from runners.cpp_runner import CppRunner
 from runners.c_runner import CRunner
 from runners.csharp_runner import CSharpRunner

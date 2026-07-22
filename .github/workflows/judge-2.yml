@@ -1,11 +1,9 @@
-name: HhOJ Online Judge
+name: HhOJ Online Judge (Worker 2)
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
   schedule:
-    - cron: '0/5 * * * *'
+    - cron: '2/5 * * * *'
 
 permissions:
   contents: read
@@ -55,7 +53,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: judge-results
+          name: judge-results-w2
           path: |
             status.txt
             judge_result.json

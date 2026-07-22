@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from runners._common import make_preexec
 
 class PythonRunner:
     def __init__(self, version='3'):
@@ -42,11 +43,13 @@ class PythonRunner:
                  open(err_path, 'w', encoding='utf-8') as ferr:
 
                 start_time = time.time()
+                preexec = make_preexec(memory_limit_kb)
                 proc = subprocess.Popen(
                     ['python3', src_path],
                     stdin=fin,
                     stdout=fout,
-                    stderr=ferr
+                    stderr=ferr,
+                    preexec_fn=preexec
                 )
 
                 try:
@@ -58,6 +61,8 @@ class PythonRunner:
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
 
+                if proc.returncode == -9:
+                    return 'MLE', elapsed_ms, 0
                 if proc.returncode != 0:
                     return 'RE', elapsed_ms, 0
 
