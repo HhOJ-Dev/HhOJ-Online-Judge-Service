@@ -11,7 +11,6 @@ const resultRoutes = require('./routes/result');
 const githubActionsRoutes = require('./routes/githubActions');
 const wsManager = require('./services/wsManager');
 const hhojRoutes = require('./routes/hhoj.js');
-const wsManager = require('./services/wsManager');
 const config = require('./config');
 const store = require('./services/store');
 
@@ -64,7 +63,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, error: err.message });
 });
 
-// Create HTTP server and WebSocket server
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -82,9 +80,6 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ type: 'connected', judgeId }));
 });
 
-server.listen(PORT, () => {
-  console.log(`HhOJ Backend Service running on port ${PORT}`);
-  console.log(`WebSocket server listening on ws://localhost:${PORT}/ws`);
 setInterval(() => {
   store.cleanup(3600000);
 }, 600000);

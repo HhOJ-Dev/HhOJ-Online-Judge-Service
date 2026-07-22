@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   judge:
     runs-on: ubuntu-latest
@@ -13,18 +16,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Cache Dependencies
+      - name: Cache Pip Packages
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/pip
-            /usr/local/bin/g++
-            /usr/local/bin/gcc
-            /usr/lib/jvm
-            /usr/local/bin/mono
-          key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements*.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
-            ${{ runner.os }}-deps-
+            ${{ runner.os }}-pip-
 
       - name: Install Dependencies
         run: |

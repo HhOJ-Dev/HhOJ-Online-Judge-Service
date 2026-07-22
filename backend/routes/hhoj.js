@@ -19,18 +19,35 @@ router.get('/judge_fetch.php', requireApiKey, (req, res) => {
     };
 
     if (inlineTestcases && item.testcases) {
-      submission.testcases = item.testcases.map((tc, idx) => ({
-        id: idx,
-        inlined: true,
-        input_data: Buffer.from(tc.input || '').toString('base64'),
-        output_data: Buffer.from(tc.output || '').toString('base64'),
-        score: tc.score || 10
-      }));
+      submission.testcases = item.testcases.map((tc, idx) => {
+        let inputData = '';
+        let outputData = '';
+
+        if (tc.input) {
+          inputData = Buffer.from(tc.input, 'utf-8').toString('base64');
+        } else if (tc.input_data) {
+          inputData = tc.input_data;
+        }
+
+        if (tc.output) {
+          outputData = Buffer.from(tc.output, 'utf-8').toString('base64');
+        } else if (tc.output_data) {
+          outputData = tc.output_data;
+        }
+
+        return {
+          id: idx,
+          inlined: true,
+          input_data: inputData,
+          output_data: outputData,
+          score: tc.score || 10
+        };
+      });
     } else if (item.testcases) {
       submission.testcases = item.testcases.map((tc, idx) => ({
         id: idx,
-        input_url: tc.inputUrl || '',
-        output_url: tc.outputUrl || '',
+        input_url: tc.inputUrl || tc.input_url || '',
+        output_url: tc.outputUrl || tc.output_url || '',
         score: tc.score || 10
       }));
     }
