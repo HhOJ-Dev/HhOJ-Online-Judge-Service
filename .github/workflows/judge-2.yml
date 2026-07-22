@@ -3,28 +3,32 @@ name: HhOJ Online Judge (Worker 2)
 on:
   workflow_dispatch:
   schedule:
-    # Worker 2: 分钟 2,7,12,17... (与 Worker 1 错开2分钟)
     - cron: '2/5 * * * *'
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   judge:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/hhoj-dev/judge-env:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            blankend
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: blankend/requirements.txt
+
+      - name: Install deps
+        run: pip install -r blankend/requirements.txt
 
       - name: Run Judge
-        id: judge
         run: |
           if [ -z "${{ secrets.HHOJ_API_KEY }}" ]; then
             echo "::error::HHOJ_API_KEY not configured" && exit 1
@@ -55,5 +59,4 @@ jobs:
             judge_result.json
             submissions.json
             summary.md
-            judge_work/
           if-no-files-found: ignore
