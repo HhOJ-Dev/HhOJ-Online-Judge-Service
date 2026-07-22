@@ -29,6 +29,12 @@ npm-debug.log*
 
 # Judge workspace
 judge_workspace/
+judge_work/
+judge_result.json
+status.txt
+submissions.json
+summary.md
+judge-results/
 
 # Config (keep example)
 backend/config.local.js
