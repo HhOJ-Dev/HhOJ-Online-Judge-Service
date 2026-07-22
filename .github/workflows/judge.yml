@@ -21,11 +21,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install Dependencies
+      - name: Install Python Dependencies
         run: |
-          echo "Installing compilers and dependencies..."
-          sudo apt-get update -y
-          sudo apt-get install -y g++ gcc default-jdk python3 python3-pip mono-complete fp-compiler curl jq
           pip3 install --cache-dir ~/.cache/pip -r blankend/requirements.txt
 
       - name: Validate Secrets
@@ -69,6 +66,44 @@ jobs:
           COUNT=$(cat submissions.json | jq '.submissions | length' 2>/dev/null || echo "0")
           echo "count=$COUNT" >> $GITHUB_OUTPUT
           echo "Submissions fetched: $COUNT"
+
+      # g++ and gcc are pre-installed on ubuntu-latest.
+      # Only install extra compilers that submissions actually need.
+      - name: Install Compilers (On-Demand)
+        if: steps.fetch.outputs.count > 0
+        run: |
+          # Extract all languages from submissions
+          LANGS=$(cat submissions.json | jq -r '.submissions[].language' | sort -u)
+          echo "Languages in submissions: $LANGS"
+
+          APT_PKGS=""
+          for lang in $LANGS; do
+            case "$lang" in
+              c|cpp|cpp11|cpp11_o2|cpp14|cpp14_o2|cpp17|cpp17_o2|cpp23|cpp23_o2)
+                # g++ and gcc are pre-installed
+                ;;
+              java)
+                APT_PKGS="$APT_PKGS default-jdk"
+                ;;
+              csharp)
+                APT_PKGS="$APT_PKGS mono-complete"
+                ;;
+              pascal)
+                APT_PKGS="$APT_PKGS fp-compiler"
+                ;;
+              python|python3)
+                # python3 is pre-installed
+                ;;
+            esac
+          done
+
+          if [ -n "$APT_PKGS" ]; then
+            echo "Installing: $APT_PKGS"
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends $APT_PKGS
+          else
+            echo "No extra compilers needed (g++/gcc/python3 pre-installed)"
+          fi
 
       - name: Process Submissions
         if: steps.fetch.outputs.count > 0
