@@ -6,7 +6,6 @@ from runners.python_runner import PythonRunner
 from runners.java_runner import JavaRunner
 from runners.pascal_runner import PascalRunner
 
-
 LANGUAGE_ALIASES = {
     'cpp': 'cpp14_o2',
     'cpp11': 'cpp11',

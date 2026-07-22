@@ -10,6 +10,7 @@ import hashlib
 import time
 import re
 import requests
+from urllib.parse import urlparse
 
 from runners import get_runner
 
@@ -123,19 +124,17 @@ def download_testcase(url, session, cache_dir):
             if is_html:
                 cookie_value = solve_infinitree_challenge(response.text)
                 if cookie_value:
-                    from urllib.parse import urlparse
                     domain = urlparse(url).hostname or ''
                     session.cookies.set('__test', cookie_value, domain=domain)
-                    # Also set in header for reliability
                     session.headers['Cookie'] = f'__test={cookie_value}'
-                    # Check for redirect in challenge HTML
+                    # Follow redirect in challenge HTML if present
                     redirect_match = re.search(r'location\.href="([^"]+)"', response.text)
                     if redirect_match:
                         redirect_url = redirect_match.group(1)
                         if redirect_url.startswith('/'):
-                            from urllib.parse import urlparse as _up
                             parsed = urlparse(url)
                             redirect_url = f"{parsed.scheme}://{parsed.netloc}{redirect_url}"
+                        url = redirect_url
                     print(f"  [Download] Attempt {attempt+1}: solved InfinityFree challenge, retrying", file=sys.stderr)
                     continue
                 else:
@@ -380,9 +379,7 @@ def main():
     results = []
     for submission in submissions:
         sub_id = submission['id']
-        code = submission.get('code', '')
         print(f"[{sub_id}] Judging {submission.get('language', 'unknown')}...")
-        print(f"[{sub_id}] Code preview: {repr(code[:200])}", file=sys.stderr)
         try:
             result = judge_submission(submission, work_dir, session)
             results.append(result)
