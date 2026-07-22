@@ -128,8 +128,8 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
             with open(out_path, 'wb') as f:
                 f.write(base64.b64decode(tc['output_data']))
             return in_path, out_path
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [TC {tc.get('id')}] base64 decode failed: {e}", file=sys.stderr)
 
     if tc.get('input_url') and tc.get('output_url'):
         din = download_testcase(tc['input_url'], session, cache_dir)
@@ -139,6 +139,12 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
             shutil.copy(din, in_path)
             shutil.copy(dout, out_path)
             return in_path, out_path
+        else:
+            print(f"  [TC {tc.get('id')}] download failed: in={bool(din)} out={bool(dout)}", file=sys.stderr)
+            print(f"    input_url: {tc.get('input_url')[:80]}", file=sys.stderr)
+            print(f"    output_url: {tc.get('output_url')[:80]}", file=sys.stderr)
+    else:
+        print(f"  [TC {tc.get('id')}] no testcase data (inlined={tc.get('inlined')}, has_input_data={bool(tc.get('input_data'))}, has_url={bool(tc.get('input_url'))})", file=sys.stderr)
     return None, None
 
 
