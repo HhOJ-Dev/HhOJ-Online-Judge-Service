@@ -28,6 +28,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase repository owner
+        id: repo
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -35,7 +39,7 @@ jobs:
           file: ./Dockerfile.judge
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/judge-env:latest
-            ghcr.io/${{ github.repository_owner }}/judge-env:${{ github.sha }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/judge-env:latest
+            ghcr.io/${{ steps.repo.outputs.owner }}/judge-env:latest
+            ghcr.io/${{ steps.repo.outputs.owner }}/judge-env:${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ steps.repo.outputs.owner }}/judge-env:latest
           cache-to: type=inline
