@@ -24,6 +24,7 @@ class CRunner:
             )
             if result.returncode != 0:
                 return False, result.stderr
+            os.chmod(exe_path, 0o755)
             return True, ''
         except subprocess.TimeoutExpired:
             return False, 'Compilation timed out'

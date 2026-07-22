@@ -220,12 +220,18 @@ def judge_submission(submission, work_dir, session):
         tc_result = {'id': tc.get('id'), 'status': status, 'time_used': t, 'memory_used': m}
 
         if status == 'OK':
-            if compare_output(os.path.join(sub_dir, 'user.out'), out_path):
-                tc_result['status'] = RESULT_AC
-                total_score += tc.get('score', 10)
+            user_out_path = os.path.join(sub_dir, 'user.out')
+            if os.path.exists(user_out_path):
+                if compare_output(user_out_path, out_path):
+                    tc_result['status'] = RESULT_AC
+                    total_score += tc.get('score', 10)
+                else:
+                    tc_result['status'] = RESULT_WA
+                    final = RESULT_WA
             else:
-                tc_result['status'] = RESULT_WA
-                final = RESULT_WA
+                tc_result['status'] = RESULT_RE
+                final = RESULT_RE
+                result['error_message'] = f'User output file not found: {user_out_path}'
         elif status in (RESULT_TLE, RESULT_MLE, RESULT_RE):
             final = status
             if status in (RESULT_TLE, RESULT_MLE):
