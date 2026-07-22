@@ -115,25 +115,45 @@ def download_testcase(url, session, cache_dir):
     if os.path.exists(cache_path):
         return cache_path
 
-    try:
-        response = session.get(url, timeout=30)
-        if response.status_code == 200:
-            # Handle InfinityFree challenge
-            if 'text/html' in response.headers.get('content-type', '') or response.text.startswith('<html'):
+    for attempt in range(3):
+        try:
+            response = session.get(url, timeout=30, allow_redirects=True)
+            is_html = 'text/html' in response.headers.get('content-type', '') or response.text.strip().startswith('<html') or response.text.strip().startswith('<!DOCTYPE')
+
+            if is_html:
                 cookie_value = solve_infinitree_challenge(response.text)
                 if cookie_value:
-                    domain = url.split('/')[2] if '://' in url else ''
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).hostname or ''
                     session.cookies.set('__test', cookie_value, domain=domain)
-                    response = session.get(url, timeout=30)
+                    # Also set in header for reliability
+                    session.headers['Cookie'] = f'__test={cookie_value}'
+                    # Check for redirect in challenge HTML
+                    redirect_match = re.search(r'location\.href="([^"]+)"', response.text)
+                    if redirect_match:
+                        redirect_url = redirect_match.group(1)
+                        if redirect_url.startswith('/'):
+                            from urllib.parse import urlparse as _up
+                            parsed = urlparse(url)
+                            redirect_url = f"{parsed.scheme}://{parsed.netloc}{redirect_url}"
+                    print(f"  [Download] Attempt {attempt+1}: solved InfinityFree challenge, retrying", file=sys.stderr)
+                    continue
+                else:
+                    print(f"  [Download] Attempt {attempt+1}: got HTML but failed to solve challenge (status={response.status_code})", file=sys.stderr)
+                    continue
 
-            if response.status_code == 200 and not response.text.startswith('<html'):
+            if response.status_code == 200:
                 os.makedirs(cache_dir, exist_ok=True)
                 with open(cache_path, 'wb') as f:
                     f.write(response.content)
+                print(f"  [Download] Saved testcase ({len(response.content)} bytes)", file=sys.stderr)
                 return cache_path
-    except Exception:
-        pass
+            else:
+                print(f"  [Download] Attempt {attempt+1}: HTTP {response.status_code}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [Download] Attempt {attempt+1}: {e}", file=sys.stderr)
 
+    print(f"  [Download] Failed to download after 3 attempts: {url}", file=sys.stderr)
     return None
 
 
