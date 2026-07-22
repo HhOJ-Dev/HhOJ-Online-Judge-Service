@@ -1,23 +1,10 @@
-import resource
-
+from runners._common import make_preexec
 from runners.cpp_runner import CppRunner
 from runners.c_runner import CRunner
 from runners.csharp_runner import CSharpRunner
 from runners.python_runner import PythonRunner
 from runners.java_runner import JavaRunner
 from runners.pascal_runner import PascalRunner
-
-
-def _make_preexec(memory_limit_kb):
-    """Create a preexec_fn that sets memory limit via ulimit."""
-    if not memory_limit_kb or memory_limit_kb <= 0:
-        return None
-
-    def preexec():
-        limit_bytes = memory_limit_kb * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
-
-    return preexec
 
 
 LANGUAGE_ALIASES = {

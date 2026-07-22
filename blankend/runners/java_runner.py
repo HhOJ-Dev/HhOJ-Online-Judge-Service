@@ -1,7 +1,7 @@
 import os
 import subprocess
 import time
-from runners import _make_preexec
+from runners._common import make_preexec
 
 class JavaRunner:
     def __init__(self):
@@ -42,7 +42,7 @@ class JavaRunner:
                  open(err_path, 'w', encoding='utf-8') as ferr:
 
                 start_time = time.time()
-                preexec = _make_preexec(memory_limit_kb)
+                preexec = make_preexec(memory_limit_kb)
                 proc = subprocess.Popen(
                     ['java', '-cp', sub_dir, 'Main'],
                     stdin=fin,
