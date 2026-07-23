@@ -3,7 +3,7 @@ name: HhOJ Online Judge (Worker 3)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '4/5 * * * *'
+    - cron: '2/5 * * * *'
 
 permissions:
   contents: read

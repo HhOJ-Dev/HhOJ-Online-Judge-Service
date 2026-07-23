@@ -17,9 +17,11 @@
 .
 ├── .github/
 │   └── workflows/
-│       ├── judge-1.yml      # GitHub Actions 评测工作流 (Worker 1)
-│       ├── judge-2.yml      # GitHub Actions 评测工作流 (Worker 2)
-│       └── judge-3.yml      # GitHub Actions 评测工作流 (Worker 3)
+│       ├── judge-1.yml      # GitHub Actions 评测工作流 (Worker 1, cron: 0/5)
+│       ├── judge-2.yml      # GitHub Actions 评测工作流 (Worker 2, cron: 1/5)
+│       ├── judge-3.yml      # GitHub Actions 评测工作流 (Worker 3, cron: 2/5)
+│       ├── judge-4.yml      # GitHub Actions 评测工作流 (Worker 4, cron: 3/5)
+│       └── judge-5.yml      # GitHub Actions 评测工作流 (Worker 5, cron: 4/5)
 ├── backend/
 │   ├── routes/
 │   │   ├── judge.js         # 评测提交路由
