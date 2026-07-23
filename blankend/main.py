@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unified judge: fetch → judge → report in one process, sharing one session."""
-
+ 
 import os
 import sys
 import json
@@ -12,9 +12,9 @@ import time
 import requests
 from urllib.parse import urlparse
 from Crypto.Cipher import AES
-
+ 
 from runners import get_runner
-
+ 
 RESULT_AC = 'AC'
 RESULT_WA = 'WA'
 RESULT_TLE = 'TLE'
@@ -22,7 +22,7 @@ RESULT_MLE = 'MLE'
 RESULT_RE = 'RE'
 RESULT_CE = 'CE'
 RESULT_UKE = 'UKE'
-
+ 
 STATUS_TO_HHOJ = {
     RESULT_AC: 'accepted',
     RESULT_WA: 'wrong',
@@ -32,8 +32,8 @@ STATUS_TO_HHOJ = {
     RESULT_CE: 'ce',
     RESULT_UKE: 're',
 }
-
-
+ 
+ 
 def solve_challenge(html_text):
     numbers = re.findall(r'toNumbers\("([a-f0-9]{32})"\)', html_text)
     if len(numbers) < 3:
@@ -55,8 +55,8 @@ def solve_challenge(html_text):
         return AES.new(a, AES.MODE_CBC, iv=b).decrypt(c).hex()
     except Exception:
         return None
-
-
+ 
+ 
 def create_session(host, api_key):
     """Create session and solve InfinityFree challenge once."""
     session = requests.Session()
@@ -66,7 +66,7 @@ def create_session(host, api_key):
         'Accept': 'application/json, text/javascript, */*; q=0.01',
     })
     domain = urlparse(host).hostname or host
-
+ 
     # Solve challenge by hitting the API endpoint directly
     url = f"{host}/api/judge_fetch.php"
     for attempt in range(8):
@@ -74,25 +74,25 @@ def create_session(host, api_key):
         ct = resp.headers.get('content-type', '')
         if 'text/html' not in ct and not resp.text.strip().startswith('<html'):
             return session, resp  # Already got real data
-
+ 
         cookie = solve_challenge(resp.text)
         if not cookie:
             continue
         session.cookies.set('__test', cookie, domain=domain, path='/')
         session.headers['Cookie'] = f'__test={cookie}'
-
+ 
         redirect = re.search(r'location\.href="([^"]+)"', resp.text)
         if redirect:
             redirect_url = redirect.group(1).replace('***', host)
             if redirect_url.startswith('/'):
                 redirect_url = host + redirect_url
             url = redirect_url
-
+ 
         print(f"  Challenge attempt {attempt+1}: solved, retrying...", file=sys.stderr)
-
+ 
     return session, None
-
-
+ 
+ 
 def download_testcase(url, session, cache_dir):
     cache_path = os.path.join(cache_dir, hashlib.md5(url.encode()).hexdigest())
     if os.path.exists(cache_path):
@@ -115,12 +115,12 @@ def download_testcase(url, session, cache_dir):
         except Exception:
             continue
     return None
-
-
+ 
+ 
 def prepare_testcase(tc, sub_dir, session, cache_dir):
     in_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.in")
     out_path = os.path.join(sub_dir, f"test_{tc.get('id', 0)}.out")
-
+ 
     if tc.get('inlined') and tc.get('input_data') and tc.get('output_data'):
         try:
             with open(in_path, 'wb') as f:
@@ -130,7 +130,7 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
             return in_path, out_path
         except Exception as e:
             print(f"  [TC {tc.get('id')}] base64 decode failed: {e}", file=sys.stderr)
-
+ 
     if tc.get('input_url') and tc.get('output_url'):
         din = download_testcase(tc['input_url'], session, cache_dir)
         dout = download_testcase(tc['output_url'], session, cache_dir)
@@ -146,8 +146,8 @@ def prepare_testcase(tc, sub_dir, session, cache_dir):
     else:
         print(f"  [TC {tc.get('id')}] no testcase data (inlined={tc.get('inlined')}, has_input_data={bool(tc.get('input_data'))}, has_url={bool(tc.get('input_url'))})", file=sys.stderr)
     return None, None
-
-
+ 
+ 
 def compare_output(user_out_path, expected_out_path):
     try:
         with open(user_out_path, 'rb') as f:
@@ -163,8 +163,8 @@ def compare_output(user_out_path, expected_out_path):
         return ul == el
     except Exception:
         return False
-
-
+ 
+ 
 def judge_submission(submission, work_dir, session):
     sub_id = submission.get('id', 'unknown')
     language = submission.get('language', '')
@@ -172,59 +172,59 @@ def judge_submission(submission, work_dir, session):
     testcases = submission.get('testcases') or []
     time_limit = submission.get('time_limit', 1000)
     memory_limit = submission.get('memory_limit', 256)
-
+ 
     sub_dir = os.path.join(work_dir, f"sub_{sub_id}")
     cache_dir = os.path.join(work_dir, 'tc_cache')
     os.makedirs(sub_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-
+ 
     result = {
         'submission_id': sub_id, 'status': RESULT_UKE, 'score': 0,
         'time_used': 0, 'memory_used': 0, 'error_message': '', 'testcases': []
     }
-
+ 
     if not code:
         result['status'] = RESULT_CE
         result['error_message'] = 'Empty source code'
         return result
-
+ 
     try:
         runner = get_runner(language)
     except ValueError as e:
         result['status'] = RESULT_CE
         result['error_message'] = str(e)
         return result
-
+ 
     ok, err = runner.compile(code, sub_dir)
     if not ok:
         result['status'] = RESULT_CE
         result['error_message'] = err[:5000]
         return result
-
+ 
     total_score = 0
     max_score = sum(tc.get('score', 10) for tc in testcases) if testcases else 100
     if max_score == 0:
         max_score = 100
-
+ 
     max_time = max_mem = 0
     stopped_early = False
     final = RESULT_AC
-
+ 
     for tc in testcases:
         if stopped_early:
             result['testcases'].append({'id': tc.get('id'), 'status': 'skipped', 'time_used': 0, 'memory_used': 0})
             continue
-
+ 
         in_path, out_path = prepare_testcase(tc, sub_dir, session, cache_dir)
         if not in_path or not out_path:
             result['testcases'].append({'id': tc.get('id'), 'status': RESULT_UKE, 'time_used': 0, 'memory_used': 0})
             final = RESULT_UKE
             result['error_message'] = f'Failed to prepare testcase {tc.get("id")}'
             break
-
+ 
         status, t, m = runner.run(sub_dir, in_path, time_limit, memory_limit * 1024)
         tc_result = {'id': tc.get('id'), 'status': status, 'time_used': t, 'memory_used': m}
-
+ 
         if status == 'OK':
             user_out_path = os.path.join(sub_dir, 'user.out')
             if os.path.exists(user_out_path):
@@ -242,28 +242,28 @@ def judge_submission(submission, work_dir, session):
             final = status
             if status in (RESULT_TLE, RESULT_MLE):
                 stopped_early = True
-
+ 
         max_time = max(max_time, t)
         max_mem = max(max_mem, m)
         result['testcases'].append(tc_result)
-
+ 
     if final == RESULT_AC and total_score < max_score:
         final = RESULT_WA
-
+ 
     result['status'] = final
     result['score'] = 100 if final == RESULT_AC else (int(total_score * 100 / max_score) if max_score > 0 else 0)
     result['time_used'] = max_time
     result['memory_used'] = max_mem
-
+ 
     if final == RESULT_RE:
         err_path = os.path.join(sub_dir, 'user.err')
         if os.path.exists(err_path):
             with open(err_path, 'r', errors='ignore') as f:
                 result['error_message'] = f.read()[:5000]
-
+ 
     return result
-
-
+ 
+ 
 def report_results(session, site_url, results):
     url = f"{site_url}/api/judge_report.php"
     payload = {'results': [{
@@ -274,7 +274,7 @@ def report_results(session, site_url, results):
         'memory_used': r['memory_used'],
         'error_message': r.get('error_message', '')[:5000]
     } for r in results]}
-
+ 
     try:
         resp = session.post(url, json=payload, timeout=10)
         if 'text/html' in resp.headers.get('content-type', '') or resp.text.startswith('<html'):
@@ -287,44 +287,44 @@ def report_results(session, site_url, results):
         return resp.status_code == 200
     except Exception:
         return False
-
-
+ 
+ 
 def main():
     parser = argparse.ArgumentParser(description='HhOJ Unified Judge')
     parser.add_argument('--host', required=True)
     parser.add_argument('--api-key', default=os.environ.get('HHOJ_API_KEY', ''))
     parser.add_argument('--work-dir', default='./judge_work')
     args = parser.parse_args()
-
+ 
     host = args.host.rstrip('/')
     work_dir = os.path.abspath(args.work_dir)
     os.makedirs(work_dir, exist_ok=True)
-
+ 
     t0 = time.time()
-
+ 
     # Step 1: Create session + fetch (challenge solved once here)
     session, response = create_session(host, args.api_key)
     if response is None:
         print("Failed: challenge not solved", file=sys.stderr)
         sys.exit(1)
-
+ 
     # Save submissions.json for debugging
     with open('submissions.json', 'w', encoding='utf-8') as f:
         f.write(response.text)
-
+ 
     try:
         data = response.json()
     except Exception as e:
         print(f"Parse error: {e}", file=sys.stderr)
         sys.exit(1)
-
+ 
     if not data.get('success'):
         print(f"API error: {data.get('message', 'Unknown')}", file=sys.stderr)
         sys.exit(1)
-
+ 
     submissions = data.get('submissions', [])
     print(f"Fetch: {int((time.time()-t0)*1000)}ms, count={len(submissions)}")
-
+ 
     if not submissions:
         print("No pending submissions")
         with open('status.txt', 'w') as f:
@@ -332,7 +332,7 @@ def main():
         with open('summary.md', 'w') as f:
             f.write('# HhOJ Judge Result\n\n**Status**: No pending submissions\n')
         return
-
+ 
     # Step 2: Judge (reusing same session - no redundant challenge!)
     t1 = time.time()
     results = []
@@ -351,12 +351,12 @@ def main():
                 'time_used': 0, 'memory_used': 0, 'error_message': str(e)[:5000]
             })
     print(f"Judge: {int((time.time()-t1)*1000)}ms")
-
+ 
     # Step 3: Report (reusing same session)
     t2 = time.time()
     ok = report_results(session, host, results)
     print(f"Report: {'OK' if ok else 'FAILED'} ({int((time.time()-t2)*1000)}ms)")
-
+ 
     # Write output files
     with open('judge_result.json', 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
@@ -371,9 +371,9 @@ def main():
             if r.get('error_message'):
                 f.write(f"- **Error**: {r['error_message'][:200]}\n")
             f.write('\n')
-
+ 
     print(f"Total: {int((time.time()-t0)*1000)}ms")
-
-
+ 
+ 
 if __name__ == '__main__':
     main()
