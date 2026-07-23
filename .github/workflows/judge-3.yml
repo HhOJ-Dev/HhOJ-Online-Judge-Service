@@ -15,7 +15,7 @@ concurrency:
 jobs:
   judge:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     env:
       HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
       HHOJ_HOST: ${{ secrets.HHOJ_HOST }}
