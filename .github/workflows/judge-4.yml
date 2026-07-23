@@ -1,0 +1,68 @@
+name: HhOJ Online Judge (Worker 4)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: judge-worker-4
+  cancel-in-progress: true
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HHOJ_API_KEY: ${{ secrets.HHOJ_API_KEY }}
+      HHOJ_HOST: ${{ secrets.HHOJ_HOST }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            blankend
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: blankend/requirements.txt
+
+      - name: Install deps & Run
+        run: |
+          set -euo pipefail
+          if [ -z "$HHOJ_API_KEY" ] || [ -z "$HHOJ_HOST" ]; then
+            echo "::error::Secrets not configured" && exit 1
+          fi
+          START=$(date +%s%N)
+          pip install -q -r blankend/requirements.txt
+          echo "Pip: $((($(date +%s%N) - START)/1000000))ms"
+          HOST="${HHOJ_HOST%/}"
+          bash blankend/judge_all.sh "$HOST"
+          echo "Total: $((($(date +%s%N) - START)/1000000))ms"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f summary.md ]; then
+            cat summary.md >> $GITHUB_STEP_SUMMARY
+          else
+            printf "## HhOJ Judge Result\n\n**Verdict**: Unknown Error (UKE)\n" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: judge-results-w4
+          path: |
+            status.txt
+            judge_result.json
+            submissions.json
+            summary.md
+          if-no-files-found: ignore
