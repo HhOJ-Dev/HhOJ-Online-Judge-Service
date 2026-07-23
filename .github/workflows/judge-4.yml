@@ -1,15 +1,15 @@
-name: HhOJ Online Judge (Worker 2)
+name: HhOJ Online Judge (Worker 4)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '1/5 * * * *'
+    - cron: '3/5 * * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: judge-worker-2
+  group: judge-worker-4
   cancel-in-progress: true
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: judge-results-w2
+          name: judge-results-w4
           path: |
             status.txt
             judge_result.json
