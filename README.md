@@ -17,7 +17,9 @@
 .
 ├── .github/
 │   └── workflows/
-│       └── judge.yml        # GitHub Actions 评测工作流
+│       ├── judge-1.yml      # GitHub Actions 评测工作流 (Worker 1)
+│       ├── judge-2.yml      # GitHub Actions 评测工作流 (Worker 2)
+│       └── judge-3.yml      # GitHub Actions 评测工作流 (Worker 3)
 ├── backend/
 │   ├── routes/
 │   │   ├── judge.js         # 评测提交路由
@@ -190,7 +192,7 @@ console.log('评测结果:', result);
 
 ### GitHub Actions 配置
 
-确保仓库已启用 GitHub Actions，工作流文件位于 `.github/workflows/judge.yml`。
+确保仓库已启用 GitHub Actions，工作流文件位于 `.github/workflows/judge-1.yml`。
 
 ## 许可证
 

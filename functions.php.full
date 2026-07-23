@@ -2921,7 +2921,7 @@ function getJudgeConfig(): array {
         'github_token'    => '',
         'repo_owner'      => 'HhoJ-Dev',
         'repo_name'       => 'HhOJ-Online-Judge-Service',
-        'workflow_id'     => 'judge.yml',
+        'workflow_id'     => 'judge-1.yml',
         'branch'          => 'main',
         'github_username' => '',
         'api_key'         => '',
@@ -3100,7 +3100,7 @@ function triggerSingleJudgeRunner(array $runner): array {
 
     $owner = (string)($runner['owner'] ?? '');
     $repo  = (string)($runner['repo'] ?? '');
-    $workflow_id = (string)($runner['workflow_id'] ?? 'judge.yml');
+    $workflow_id = (string)($runner['workflow_id'] ?? 'judge-1.yml');
     $branch = (string)($runner['branch'] ?? 'main');
 
     $url = "https://api.github.com/repos/{$owner}/{$repo}/actions/workflows/{$workflow_id}/dispatches";
