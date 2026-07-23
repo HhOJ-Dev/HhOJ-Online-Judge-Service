@@ -632,7 +632,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                     isset($_POST['enabled']),
                     trim($_POST['owner'] ?? ''),
                     trim($_POST['repo'] ?? ''),
-                    trim($_POST['workflow_id'] ?? '') ?: 'judge.yml',
+                    trim($_POST['workflow_id'] ?? '') ?: 'judge-1.yml',
                     trim($_POST['branch'] ?? '') ?: 'main',
                     trim($_POST['github_token'] ?? ''),
                     trim($_POST['github_username'] ?? ''),
@@ -3452,7 +3452,7 @@ if (!in_array($_adminSiteStyleRaw, ['original', 'luogu'], true)) $_adminSiteStyl
                     $formRunner = $isNew ? [
                         'id' => 0, 'name' => '', 'priority' => 100, 'enabled' => 1,
                         'owner' => 'HhOJ-Dev', 'repo' => 'HhOJ-Online-Judge-Service',
-                        'workflow_id' => 'judge.yml', 'branch' => 'main',
+                        'workflow_id' => 'judge-1.yml', 'branch' => 'main',
                         'github_token' => '', 'github_username' => '', 'api_key' => '',
                     ] : $editRunner;
                     $formAction = $isNew ? 'add_judge_runner' : 'update_judge_runner';
@@ -3497,7 +3497,7 @@ if (!in_array($_adminSiteStyleRaw, ['original', 'luogu'], true)) $_adminSiteStyl
                         <div class="judge-form-row">
                             <div class="judge-form-group">
                                 <label>Workflow 文件名</label>
-                                <input type="text" name="workflow_id" value="<?= htmlspecialchars($formRunner['workflow_id']) ?>" placeholder="judge.yml">
+                                <input type="text" name="workflow_id" value="<?= htmlspecialchars($formRunner['workflow_id']) ?>" placeholder="judge-1.yml">
                             </div>
                             <div class="judge-form-group">
                                 <label>触发分支</label>
