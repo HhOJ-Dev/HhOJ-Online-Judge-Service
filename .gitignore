@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Environment files
+.env
+backend/.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+*.exe
+*.out
+*.o
+
+# Logs
+*.log
+npm-debug.log*
+
+# Judge workspace
+judge_workspace/
+judge_work/
+judge_result.json
+status.txt
+submissions.json
+summary.md
+judge-results/
+
+# Config (keep example)
+backend/config.local.js
