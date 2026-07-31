@@ -104,6 +104,7 @@ class StoreService {
       const age = now - new Date(data.createdAt).getTime();
       if (age > maxAge) {
         judgeStore.delete(id);
+        wsManager.cleanup(id); // Also clean up WebSocket buffered messages
       }
     }
   }

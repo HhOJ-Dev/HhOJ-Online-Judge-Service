@@ -234,12 +234,13 @@ class JudgeWorker:
     def _prepare_testcase(self, tc, in_path, out_path):
         """Prepare testcase input/output files."""
         # Inlined testcases (base64 encoded in request)
-        if tc.get('inlined') and tc.get('input_data') and tc.get('output_data'):
+        # Check for inlined flag, even if input_data/output_data are empty strings
+        if tc.get('inlined') and 'input_data' in tc and 'output_data' in tc:
             try:
                 with open(in_path, 'wb') as f:
-                    f.write(base64.b64decode(tc['input_data']))
+                    f.write(base64.b64decode(tc['input_data']) if tc['input_data'] else b'')
                 with open(out_path, 'wb') as f:
-                    f.write(base64.b64decode(tc['output_data']))
+                    f.write(base64.b64decode(tc['output_data']) if tc['output_data'] else b'')
                 return True
             except Exception:
                 return False

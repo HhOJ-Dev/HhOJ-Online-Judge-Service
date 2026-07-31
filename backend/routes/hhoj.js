@@ -23,13 +23,13 @@ router.get('/judge_fetch.php', requireApiKey, (req, res) => {
         let inputData = '';
         let outputData = '';
 
-        if (tc.input) {
+        if (tc.input !== undefined && tc.input !== null) {
           inputData = Buffer.from(tc.input, 'utf-8').toString('base64');
         } else if (tc.input_data) {
           inputData = tc.input_data;
         }
 
-        if (tc.output) {
+        if (tc.output !== undefined && tc.output !== null) {
           outputData = Buffer.from(tc.output, 'utf-8').toString('base64');
         } else if (tc.output_data) {
           outputData = tc.output_data;

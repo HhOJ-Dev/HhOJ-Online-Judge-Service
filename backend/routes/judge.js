@@ -119,9 +119,9 @@ router.post('/judge', async (req, res) => {
 
 /**
  * GET /api/status/:judgeId
- * Get judge status (requires API Key)
+ * Get judge status (public, no API key required)
  */
-router.get('/status/:judgeId', requireApiKey, async (req, res) => {
+router.get('/status/:judgeId', async (req, res) => {
   try {
     const { judgeId } = req.params;
     const record = store.get(judgeId);

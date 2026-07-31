@@ -29,7 +29,7 @@ const apiLimiter = rateLimit({
 
 const judgeLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: config.judge.mode === 'direct' ? 60 : 5, // direct模式放宽限制（评测只需~500ms）
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Judge requests rate limited, please wait' }
@@ -48,12 +48,21 @@ app.use(cors({
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// Apply rate limiters selectively — exclude internal worker endpoints
-app.use('/api/judge', judgeLimiter);
+// Apply rate limiters selectively:
+// - judgeLimiter: ONLY on POST /api/judge (exact path, not prefix match)
+// - apiLimiter: only on mutation endpoints, NOT on status/result polling
 app.use('/api', (req, res, next) => {
-  // Skip rate limiting for internal worker endpoints
-  if (req.path === '/judge_fetch.php' || req.path === '/judge_report.php') {
+  // Skip rate limiting for polling and internal worker endpoints
+  const path = req.path;
+  if (path === '/judge_fetch.php' || 
+      path === '/judge_report.php' ||
+      path.startsWith('/status/') ||
+      path.startsWith('/result/')) {
     return next();
+  }
+  // Apply judge-specific rate limit only to the submission endpoint
+  if (req.method === 'POST' && path === '/judge') {
+    return judgeLimiter(req, res, next);
   }
   apiLimiter(req, res, next);
 });
