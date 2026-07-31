@@ -32,7 +32,20 @@ router.get('/result/:judgeId', async (req, res) => {
       });
     }
 
-    // Get result from GitHub artifact
+    // If result already stored (e.g. from callback), return immediately
+    // to avoid slow GitHub artifact download (~30s)
+    if (record.result) {
+      return res.json({
+        success: true,
+        data: {
+          judgeId,
+          status: record.status,
+          result: record.result
+        }
+      });
+    }
+
+    // Get result from GitHub artifact (only if not already in store)
     if (record.runId) {
       try {
         const result = await githubService.getResult(record.runId);
@@ -42,7 +55,7 @@ router.get('/result/:judgeId', async (req, res) => {
           data: {
             judgeId,
             status: record.status,
-            result: record.result,
+            result: record.result || result?.result,
             artifact: result,
             runId: record.runId
           }

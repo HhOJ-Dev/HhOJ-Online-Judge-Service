@@ -122,8 +122,12 @@ class HhOJClient {
             if (data.status === 'completed' || data.status === 'error') {
               clearTimeout(timeout);
               ws.close();
-              // 获取完整结果（包括错误详情）
-              this.getResult(judgeId).then(resolve, reject);
+              // 如果推送已包含完整结果，直接使用，避免额外 HTTP 请求
+              if (data.result) {
+                resolve(data);
+              } else {
+                this.getResult(judgeId).then(resolve, reject);
+              }
             }
           }
         } catch (e) {
