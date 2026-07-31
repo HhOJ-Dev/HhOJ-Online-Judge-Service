@@ -19,8 +19,8 @@ class HhOJClient {
     // WebSocket URL: http(s):// -> ws(s)://
     this.wsBaseUrl = this.baseUrl.replace(/^http/, 'ws');
     this.options = {
-      pollInterval: options.pollInterval || 1000,
-      maxPollAttempts: options.maxPollAttempts || 300,
+      pollInterval: options.pollInterval || 500,       // 降低轮询间隔从 1000ms → 500ms
+      maxPollAttempts: options.maxPollAttempts || 600,  // 增加最大轮询次数（配合更短间隔）
       timeout: options.timeout || 300000, // 5 minutes default
       useWebSocket: options.useWebSocket !== false, // 默认使用 WebSocket
     };

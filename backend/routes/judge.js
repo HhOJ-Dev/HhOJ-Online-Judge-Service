@@ -64,24 +64,37 @@ router.post('/judge', async (req, res) => {
       testcasesCount: testcases.length
     });
 
-    // Trigger GitHub Actions workflow
+    // Trigger GitHub Actions workflow (only in github or hybrid mode)
+    const judgeMode = config.judge.mode || 'direct';
     let runId = null;
-    try {
-      runId = await githubService.triggerWorkflow(payload);
-      store.update(judgeId, {
-        runId,
-        status: 'queued'
-      });
-    } catch (error) {
-      store.update(judgeId, {
-        status: 'error',
-        error: error.message
-      });
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to trigger judge workflow',
-        details: error.message
-      });
+
+    if (judgeMode === 'github' || judgeMode === 'hybrid') {
+      try {
+        runId = await githubService.triggerWorkflow(payload);
+        store.update(judgeId, {
+          runId,
+          status: judgeMode === 'hybrid' ? 'queued' : 'queued'
+        });
+      } catch (error) {
+        // In hybrid mode, GitHub Actions failure is non-fatal (direct worker will pick it up)
+        if (judgeMode === 'github') {
+          store.update(judgeId, {
+            status: 'error',
+            error: error.message
+          });
+          return res.status(500).json({
+            success: false,
+            error: 'Failed to trigger judge workflow',
+            details: error.message
+          });
+        }
+        console.error('GitHub Actions trigger failed (hybrid mode, falling back to direct):', error.message);
+      }
+    }
+
+    // In direct mode, submission stays as 'pending' for the direct worker to pick up
+    if (judgeMode === 'direct') {
+      store.update(judgeId, { status: 'pending' });
     }
 
     res.json({
@@ -89,7 +102,7 @@ router.post('/judge', async (req, res) => {
       data: {
         judgeId,
         runId,
-        status: 'queued',
+        status: judgeMode === 'direct' ? 'pending' : 'queued',
         message: 'Judge request submitted successfully'
       }
     });

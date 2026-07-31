@@ -18,6 +18,10 @@ module.exports = {
 
   // Judge configuration
   judge: {
+    // 'direct': use persistent judge_worker (fast, ~2-3s)
+    // 'github': use GitHub Actions workers (slow, ~30s)
+    // 'hybrid': try direct first, fallback to GitHub Actions
+    mode: process.env.JUDGE_MODE || 'direct',
     defaultTimeLimit: 1000,   // ms
     defaultMemoryLimit: 256,  // MB
     supportedLanguages: [
