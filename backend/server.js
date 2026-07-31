@@ -5,6 +5,8 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const url = require('url');
 const rateLimit = require('express-rate-limit');
+const { spawn } = require('child_process');
+const path = require('path');
 
 const judgeRoutes = require('./routes/judge');
 const resultRoutes = require('./routes/result');
@@ -46,8 +48,15 @@ app.use(cors({
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-app.use('/api', apiLimiter);
+// Apply rate limiters selectively — exclude internal worker endpoints
 app.use('/api/judge', judgeLimiter);
+app.use('/api', (req, res, next) => {
+  // Skip rate limiting for internal worker endpoints
+  if (req.path === '/judge_fetch.php' || req.path === '/judge_report.php') {
+    return next();
+  }
+  apiLimiter(req, res, next);
+});
 
 app.use('/api', judgeRoutes);
 app.use('/api', resultRoutes);
@@ -88,4 +97,47 @@ server.listen(PORT, () => {
   console.log(`HhOJ Backend Service running on port ${PORT}`);
   console.log(`WebSocket server listening on ws://localhost:${PORT}/ws`);
   console.log('Memory store auto-cleanup enabled (every 10 minutes)');
+  console.log(`Judge mode: ${config.judge.mode || 'direct'}`);
+
+  // Auto-spawn direct judge worker if in direct or hybrid mode
+  if (config.judge.mode === 'direct' || config.judge.mode === 'hybrid') {
+    const workerScript = path.join(__dirname, '..', 'blankend', 'judge_worker.py');
+    const apiKey = config.server.apiKey || '';
+
+    console.log(`Starting judge worker: ${workerScript}`);
+
+    const worker = spawn('python3', [
+      workerScript,
+      '--host', `http://localhost:${PORT}`,
+      '--api-key', apiKey,
+      '--poll-interval', '100'
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HHOJ_API_KEY: apiKey }
+    });
+
+    worker.stdout.on('data', (data) => {
+      process.stdout.write(`[judge-worker] ${data}`);
+    });
+
+    worker.stderr.on('data', (data) => {
+      process.stderr.write(`[judge-worker] ${data}`);
+    });
+
+    worker.on('error', (err) => {
+      console.error('Judge worker failed to start:', err.message);
+    });
+
+    worker.on('close', (code) => {
+      console.log(`Judge worker exited with code ${code}`);
+    });
+
+    // Clean shutdown
+    const shutdown = () => {
+      worker.kill('SIGTERM');
+      process.exit();
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  }
 });
