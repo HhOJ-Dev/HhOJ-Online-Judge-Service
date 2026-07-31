@@ -49,9 +49,8 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
 // Apply rate limiters selectively:
-// - judgeLimiter: only on POST /api/judge (submission)
+// - judgeLimiter: ONLY on POST /api/judge (exact path, not prefix match)
 // - apiLimiter: only on mutation endpoints, NOT on status/result polling
-app.use('/api/judge', judgeLimiter);
 app.use('/api', (req, res, next) => {
   // Skip rate limiting for polling and internal worker endpoints
   const path = req.path;
@@ -60,6 +59,10 @@ app.use('/api', (req, res, next) => {
       path.startsWith('/status/') ||
       path.startsWith('/result/')) {
     return next();
+  }
+  // Apply judge-specific rate limit only to the submission endpoint
+  if (req.method === 'POST' && path === '/judge') {
+    return judgeLimiter(req, res, next);
   }
   apiLimiter(req, res, next);
 });
