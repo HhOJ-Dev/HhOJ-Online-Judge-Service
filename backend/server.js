@@ -29,7 +29,7 @@ const apiLimiter = rateLimit({
 
 const judgeLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: config.judge.mode === 'direct' ? 60 : 5, // direct模式放宽限制（评测只需~500ms）
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Judge requests rate limited, please wait' }
