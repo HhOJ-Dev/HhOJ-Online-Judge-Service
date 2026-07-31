@@ -48,11 +48,17 @@ app.use(cors({
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// Apply rate limiters selectively — exclude internal worker endpoints
+// Apply rate limiters selectively:
+// - judgeLimiter: only on POST /api/judge (submission)
+// - apiLimiter: only on mutation endpoints, NOT on status/result polling
 app.use('/api/judge', judgeLimiter);
 app.use('/api', (req, res, next) => {
-  // Skip rate limiting for internal worker endpoints
-  if (req.path === '/judge_fetch.php' || req.path === '/judge_report.php') {
+  // Skip rate limiting for polling and internal worker endpoints
+  const path = req.path;
+  if (path === '/judge_fetch.php' || 
+      path === '/judge_report.php' ||
+      path.startsWith('/status/') ||
+      path.startsWith('/result/')) {
     return next();
   }
   apiLimiter(req, res, next);

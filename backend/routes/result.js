@@ -20,8 +20,8 @@ router.get('/result/:judgeId', async (req, res) => {
       });
     }
 
-    // If not completed yet, return current status
-    if (record.status !== 'completed') {
+    // If completed or error, return the result
+    if (record.status !== 'completed' && record.status !== 'error') {
       return res.json({
         success: true,
         data: {
@@ -41,7 +41,7 @@ router.get('/result/:judgeId', async (req, res) => {
           success: true,
           data: {
             judgeId,
-            status: 'completed',
+            status: record.status,
             result: record.result,
             artifact: result,
             runId: record.runId
@@ -52,7 +52,7 @@ router.get('/result/:judgeId', async (req, res) => {
           success: true,
           data: {
             judgeId,
-            status: 'completed',
+            status: record.status,
             result: record.result,
             runId: record.runId,
             artifactError: error.message
@@ -64,7 +64,7 @@ router.get('/result/:judgeId', async (req, res) => {
         success: true,
         data: {
           judgeId,
-          status: 'completed',
+          status: record.status,
           result: record.result
         }
       });

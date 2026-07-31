@@ -74,6 +74,14 @@ class WsManager {
   }
 
   /**
+   * Clean up buffered messages for a specific judgeId (called when store entry is deleted)
+   */
+  cleanup(judgeId) {
+    lastMessages.delete(judgeId);
+    clients.delete(judgeId);
+  }
+
+  /**
    * Get subscriber count for a judgeId
    */
   getSubscriberCount(judgeId) {

@@ -119,15 +119,11 @@ class HhOJClient {
 
             if (onProgress) onProgress(data);
 
-            if (data.status === 'completed') {
+            if (data.status === 'completed' || data.status === 'error') {
               clearTimeout(timeout);
               ws.close();
-              // 获取完整结果
+              // 获取完整结果（包括错误详情）
               this.getResult(judgeId).then(resolve, reject);
-            } else if (data.status === 'error') {
-              clearTimeout(timeout);
-              ws.close();
-              reject(new Error(data.error || 'Judge failed'));
             }
           }
         } catch (e) {
@@ -169,12 +165,8 @@ class HhOJClient {
         onProgress(status);
       }
 
-      if (status.status === 'completed') {
+      if (status.status === 'completed' || status.status === 'error') {
         return await this.getResult(judgeId);
-      }
-
-      if (status.status === 'error') {
-        throw new Error(status.error || 'Judge failed');
       }
 
       await new Promise(resolve => setTimeout(resolve, this.options.pollInterval));
