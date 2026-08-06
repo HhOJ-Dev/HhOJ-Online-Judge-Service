@@ -86,15 +86,21 @@ def create_session(host, api_key):
     # Solve challenge by hitting the API endpoint directly
     url = f"{host}/api/judge_fetch.php"
     for attempt in range(8):
+        print(f"  [Attempt {attempt+1}] GET {url}", file=sys.stderr)
         resp = session.get(url, params={'batch': 1, 'inline_testcases': 1}, timeout=15, allow_redirects=True)
         ct = resp.headers.get('content-type', '')
+        print(f"    Content-Type: {ct}, starts with HTML: {resp.text.strip().startswith('<html')}", file=sys.stderr)
+        
         if 'text/html' not in ct and not resp.text.strip().startswith('<html'):
+            print(f"  [Attempt {attempt+1}] Success! Got JSON response", file=sys.stderr)
             return session, resp  # Already got real data
  
         cookie = solve_challenge(resp.text)
         if not cookie:
             print(f"  Challenge attempt {attempt+1}: failed to solve", file=sys.stderr)
             continue
+        
+        print(f"  [Attempt {attempt+1}] Got cookie: {cookie[:8]}...", file=sys.stderr)
         session.cookies.set('__test', cookie, domain=domain, path='/')
         session.headers['Cookie'] = f'__test={cookie}'
  
@@ -104,8 +110,10 @@ def create_session(host, api_key):
             if redirect_url.startswith('/'):
                 redirect_url = host + redirect_url
             url = redirect_url
+            print(f"  [Attempt {attempt+1}] Redirect URL: {url}", file=sys.stderr)
  
         print(f"  Challenge attempt {attempt+1}: solved, retrying...", file=sys.stderr)
+        time.sleep(0.5)  # 给服务器时间处理 Cookie
  
     return session, None
  
