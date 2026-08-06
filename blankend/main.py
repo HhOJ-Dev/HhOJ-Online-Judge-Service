@@ -35,26 +35,42 @@ STATUS_TO_HHOJ = {
  
  
 def solve_challenge(html_text):
-    numbers = re.findall(r'toNumbers\("([a-f0-9]{32})"\)', html_text)
-    if len(numbers) < 3:
+    """从 HTML 中提取并解决 InfinityFree 挑战"""
+    # 尝试多个正则匹配模式
+    patterns = [
+        r'toNumbers\("([a-f0-9]{32})"\)',
+        r'toNumbers\(\'([a-f0-9]{32})\'\)',  # 单引号版本
+        r'toNumbers\("?([a-f0-9]{32})"?\)',  # 更宽松的匹配
+    ]
+    
+    numbers = None
+    for pattern in patterns:
+        numbers = re.findall(pattern, html_text)
+        if len(numbers) >= 3:
+            break
+    
+    if not numbers or len(numbers) < 3:
+        # 添加调试信息：找到了多少个匹配？
+        print(f"  [Challenge] No valid numbers found. Found {len(numbers or [])} matches", file=sys.stderr)
         return None
+    
     a, b, c = bytes.fromhex(numbers[0]), bytes.fromhex(numbers[1]), bytes.fromhex(numbers[2])
-    for factory in [
+    for i, factory in enumerate([
         lambda: AES.new(a, AES.MODE_CBC, iv=b),
         lambda: AES.new(a, AES.MODE_ECB),
         lambda: AES.new(a, AES.MODE_OFB, iv=b),
         lambda: AES.new(a, AES.MODE_CFB, iv=b),
-    ]:
+    ]):
         try:
             v = factory().decrypt(c).hex()
             if v and len(v) == 32:
+                print(f"  [Challenge] Solved using mode {i}", file=sys.stderr)
                 return v
-        except Exception:
+        except Exception as e:
             continue
-    try:
-        return AES.new(a, AES.MODE_CBC, iv=b).decrypt(c).hex()
-    except Exception:
-        return None
+    
+    print(f"  [Challenge] All AES modes failed", file=sys.stderr)
+    return None
  
  
 def create_session(host, api_key):
@@ -77,6 +93,7 @@ def create_session(host, api_key):
  
         cookie = solve_challenge(resp.text)
         if not cookie:
+            print(f"  Challenge attempt {attempt+1}: failed to solve", file=sys.stderr)
             continue
         session.cookies.set('__test', cookie, domain=domain, path='/')
         session.headers['Cookie'] = f'__test={cookie}'
