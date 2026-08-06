@@ -36,7 +36,7 @@ STATUS_TO_HHOJ = {
  
  
 def solve_challenge_with_browser(url, timeout=30):
-    """使用 Playwright 自动解决挑战"""
+    """使用 Playwright 自动解决挑战，处理多轮重定向"""
     print(f"  [Browser] Starting Playwright to solve challenge at {url}", file=sys.stderr)
     
     try:
@@ -57,7 +57,31 @@ def solve_challenge_with_browser(url, timeout=30):
             
             # 等待挑战完成（页面自动跳转或加载完成）
             print(f"  [Browser] Waiting for challenge to complete...", file=sys.stderr)
-            time.sleep(3)  # 给 JavaScript 时间执行
+            time.sleep(2)  # 给 JavaScript 时间执行
+            
+            # 处理多轮重定向：检查页面是否仍然是 HTML 挑战页面，如果是则继续等待
+            max_redirect_attempts = 5
+            for attempt in range(max_redirect_attempts):
+                content = page.content()
+                current_url = page.url
+                
+                print(f"  [Browser] Redirect attempt {attempt + 1}: {current_url}", file=sys.stderr)
+                
+                # 检查是否仍然是 JavaScript 挑战页面
+                if 'slowAES.decrypt' in content or 'location.href' in content:
+                    print(f"  [Browser] Still on challenge page, waiting for redirect...", file=sys.stderr)
+                    time.sleep(2)  # 等待重定向
+                    # 尝试获取新的 URL
+                    new_url = page.url
+                    if new_url == current_url:
+                        # URL 没变，尝试刷新或等待更长时间
+                        print(f"  [Browser] URL unchanged, waiting longer...", file=sys.stderr)
+                        time.sleep(3)
+                    continue
+                else:
+                    # 页面已经不是挑战页面
+                    print(f"  [Browser] Challenge completed after {attempt + 1} attempt(s)", file=sys.stderr)
+                    break
             
             # 获取 Cookies
             cookies = context.cookies()
