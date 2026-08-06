@@ -60,7 +60,7 @@ def solve_challenge_with_browser(url, timeout=30):
             time.sleep(2)  # 给 JavaScript 时间执行
             
             # 处理多轮重定向：检查页面是否仍然是 HTML 挑战页面，如果是则继续等待
-            max_redirect_attempts = 5
+            max_redirect_attempts = 10
             for attempt in range(max_redirect_attempts):
                 content = page.content()
                 current_url = page.url
@@ -68,15 +68,11 @@ def solve_challenge_with_browser(url, timeout=30):
                 print(f"  [Browser] Redirect attempt {attempt + 1}: {current_url}", file=sys.stderr)
                 
                 # 检查是否仍然是 JavaScript 挑战页面
+                # 如果页面包含 slowAES.decrypt 或 location.href，说明仍在挑战
                 if 'slowAES.decrypt' in content or 'location.href' in content:
                     print(f"  [Browser] Still on challenge page, waiting for redirect...", file=sys.stderr)
-                    time.sleep(2)  # 等待重定向
-                    # 尝试获取新的 URL
-                    new_url = page.url
-                    if new_url == current_url:
-                        # URL 没变，尝试刷新或等待更长时间
-                        print(f"  [Browser] URL unchanged, waiting longer...", file=sys.stderr)
-                        time.sleep(3)
+                    time.sleep(2)  # 等待 JavaScript 执行和重定向
+                    page.wait_for_load_state('networkidle', timeout=timeout * 1000)
                     continue
                 else:
                     # 页面已经不是挑战页面
@@ -91,7 +87,7 @@ def solve_challenge_with_browser(url, timeout=30):
             final_url = page.url
             print(f"  [Browser] Final URL: {final_url}", file=sys.stderr)
             
-            # 获取响应内容
+            # 获取响应内容（直接从浏览器，已经过过挑战）
             content = page.content()
             
             browser.close()
@@ -103,6 +99,8 @@ def solve_challenge_with_browser(url, timeout=30):
             }
     except Exception as e:
         print(f"  [Browser] Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return None
  
  
@@ -134,30 +132,33 @@ def create_session(host, api_key):
             )
             print(f"    Set cookie: {cookie['name']}={cookie['value'][:10]}...", file=sys.stderr)
         
-        # 现在尝试获取实际数据
-        print(f"  [Attempt 2] Fetching data with session cookies", file=sys.stderr)
-        resp = session.get(result['url'], timeout=15)
+        # 使用浏览器返回的内容，而不是重新请求
+        print(f"  [Attempt 2] Using browser content directly", file=sys.stderr)
         
-        ct = resp.headers.get('content-type', '')
-        print(f"    Content-Type: {ct}, Length: {len(resp.text)}", file=sys.stderr)
+        ct = 'application/json'
+        content = result.get('content', '')
+        print(f"    Content length: {len(content)}", file=sys.stderr)
         
         # [DEBUG] 输出网页内容
-        if len(resp.text) < 10000:
-            print(f"  [DEBUG] Response content:\n{resp.text}", file=sys.stderr)
+        if len(content) < 10000:
+            print(f"  [DEBUG] Response content:\n{content}", file=sys.stderr)
         else:
-            print(f"  [DEBUG] Response content (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
+            print(f"  [DEBUG] Response content (first 1000 chars):\n{content[:1000]}", file=sys.stderr)
         
-        if 'text/html' not in ct or resp.status_code == 200:
-            try:
-                data = resp.json()
-                if data.get('success'):
-                    print(f"  [Success] Got valid JSON response", file=sys.stderr)
-                    return session, resp
-            except Exception as e:
-                print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
-                pass
+        try:
+            data = json.loads(content)
+            if data.get('success'):
+                print(f"  [Success] Got valid JSON response", file=sys.stderr)
+                # 创建 Response 对象供后续使用
+                resp = requests.Response()
+                resp._content = content.encode('utf-8')
+                resp.headers['content-type'] = 'application/json'
+                return session, resp
+        except Exception as e:
+            print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
+            pass
         
-        print(f"  [Fallback] Trying original URL without session", file=sys.stderr)
+        print(f"  [Fallback] Trying again with fresh browser session", file=sys.stderr)
         # 如果失败，尝试用浏览器再次获取
         result2 = solve_challenge_with_browser(url, timeout=30)
         if result2:
@@ -168,9 +169,12 @@ def create_session(host, api_key):
                     domain=cookie.get('domain'),
                     path=cookie.get('path')
                 )
-            resp = session.get(result2['url'], timeout=15)
+            content2 = result2.get('content', '')
             # [DEBUG] 输出第二次尝试的网页内容
-            print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
+            print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{content2[:1000]}", file=sys.stderr)
+            resp = requests.Response()
+            resp._content = content2.encode('utf-8')
+            resp.headers['content-type'] = 'application/json'
             return session, resp
     
     return session, None
@@ -387,7 +391,7 @@ def main():
         print(f"Parse error: {e}", file=sys.stderr)
         # [DEBUG] 保存原始响应内容到文件进行调试
         with open('debug_response.txt', 'w', encoding='utf-8') as f:
-            f.write(f"Status Code: {response.status_code}\n")
+            f.write(f"Status Code: {response.status_code if hasattr(response, 'status_code') else 'N/A'}\n")
             f.write(f"Content-Type: {response.headers.get('content-type', 'N/A')}\n")
             f.write(f"Response Text (first 5000 chars):\n{response.text[:5000]}\n")
         print(f"[DEBUG] Response saved to debug_response.txt for inspection", file=sys.stderr)
