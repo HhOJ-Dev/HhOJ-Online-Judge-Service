@@ -117,13 +117,20 @@ def create_session(host, api_key):
         ct = resp.headers.get('content-type', '')
         print(f"    Content-Type: {ct}, Length: {len(resp.text)}", file=sys.stderr)
         
+        # [DEBUG] 输出网页内容
+        if len(resp.text) < 10000:
+            print(f"  [DEBUG] Response content:\n{resp.text}", file=sys.stderr)
+        else:
+            print(f"  [DEBUG] Response content (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
+        
         if 'text/html' not in ct or resp.status_code == 200:
             try:
                 data = resp.json()
                 if data.get('success'):
                     print(f"  [Success] Got valid JSON response", file=sys.stderr)
                     return session, resp
-            except:
+            except Exception as e:
+                print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
                 pass
         
         print(f"  [Fallback] Trying original URL without session", file=sys.stderr)
@@ -138,6 +145,8 @@ def create_session(host, api_key):
                     path=cookie.get('path')
                 )
             resp = session.get(result2['url'], timeout=15)
+            # [DEBUG] 输出第二次尝试的网页内容
+            print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
             return session, resp
     
     return session, None
@@ -352,6 +361,12 @@ def main():
         data = response.json()
     except Exception as e:
         print(f"Parse error: {e}", file=sys.stderr)
+        # [DEBUG] 保存原始响应内容到文件进行调试
+        with open('debug_response.txt', 'w', encoding='utf-8') as f:
+            f.write(f"Status Code: {response.status_code}\n")
+            f.write(f"Content-Type: {response.headers.get('content-type', 'N/A')}\n")
+            f.write(f"Response Text (first 5000 chars):\n{response.text[:5000]}\n")
+        print(f"[DEBUG] Response saved to debug_response.txt for inspection", file=sys.stderr)
         sys.exit(1)
  
     if not data.get('success'):
