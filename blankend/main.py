@@ -10,6 +10,7 @@ import hashlib
 import re
 import time
 import requests
+import subprocess
 from urllib.parse import urlparse
 from Crypto.Cipher import AES
  
@@ -34,48 +35,55 @@ STATUS_TO_HHOJ = {
 }
  
  
-def solve_challenge(html_text):
-    """从 HTML 中提取并解决 InfinityFree 挑战"""
-    # 尝试多个正则匹配模式
-    patterns = [
-        r'toNumbers\("([a-f0-9]{32})"\)',
-        r'toNumbers\(\'([a-f0-9]{32})\'\)',  # 单引号版本
-        r'toNumbers\("?([a-f0-9]{32})"?\)',  # 更宽松的匹配
-    ]
+def solve_challenge_with_browser(url, timeout=30):
+    """使用 Playwright 自动解决挑战"""
+    print(f"  [Browser] Starting Playwright to solve challenge at {url}", file=sys.stderr)
     
-    numbers = None
-    for pattern in patterns:
-        numbers = re.findall(pattern, html_text)
-        if len(numbers) >= 3:
-            break
-    
-    if not numbers or len(numbers) < 3:
-        # 添加调试信息：找到了多少个匹配？
-        print(f"  [Challenge] No valid numbers found. Found {len(numbers or [])} matches", file=sys.stderr)
-        print(f"  [Challenge] Response preview: {html_text[:200]}", file=sys.stderr)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print(f"  [Browser] Playwright not installed, falling back to request-only mode", file=sys.stderr)
         return None
     
-    a, b, c = bytes.fromhex(numbers[0]), bytes.fromhex(numbers[1]), bytes.fromhex(numbers[2])
-    for i, factory in enumerate([
-        lambda: AES.new(a, AES.MODE_CBC, iv=b),
-        lambda: AES.new(a, AES.MODE_ECB),
-        lambda: AES.new(a, AES.MODE_OFB, iv=b),
-        lambda: AES.new(a, AES.MODE_CFB, iv=b),
-    ]):
-        try:
-            v = factory().decrypt(c).hex()
-            if v and len(v) == 32:
-                print(f"  [Challenge] Solved using mode {i}", file=sys.stderr)
-                return v
-        except Exception as e:
-            continue
-    
-    print(f"  [Challenge] All AES modes failed", file=sys.stderr)
-    return None
+    try:
+        with sync_playwright() as p:
+            # 使用无头浏览器（headless）
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            context = browser.new_context()
+            page = context.new_page()
+            
+            print(f"  [Browser] Navigating to {url}", file=sys.stderr)
+            page.goto(url, wait_until='networkidle', timeout=timeout * 1000)
+            
+            # 等待挑战完成（页面自动跳转或加载完成）
+            print(f"  [Browser] Waiting for challenge to complete...", file=sys.stderr)
+            time.sleep(3)  # 给 JavaScript 时间执行
+            
+            # 获取 Cookies
+            cookies = context.cookies()
+            print(f"  [Browser] Got {len(cookies)} cookies", file=sys.stderr)
+            
+            # 获取当前 URL（可能已重定向）
+            final_url = page.url
+            print(f"  [Browser] Final URL: {final_url}", file=sys.stderr)
+            
+            # 获取响应内容
+            content = page.content()
+            
+            browser.close()
+            
+            return {
+                'cookies': cookies,
+                'url': final_url,
+                'content': content
+            }
+    except Exception as e:
+        print(f"  [Browser] Error: {e}", file=sys.stderr)
+        return None
  
  
 def create_session(host, api_key):
-    """Create session and solve InfinityFree challenge once."""
+    """Create session and solve challenge using browser."""
     session = requests.Session()
     session.headers.update({
         'X-API-Key': api_key,
@@ -84,45 +92,54 @@ def create_session(host, api_key):
     })
     domain = urlparse(host).hostname or host
  
-    # Solve challenge by hitting the API endpoint directly
-    url = f"{host}/api/judge_fetch.php"
-    for attempt in range(8):
-        print(f"  [Attempt {attempt+1}] GET {url}", file=sys.stderr)
-        print(f"    Cookies: {dict(session.cookies)}", file=sys.stderr)
-        resp = session.get(url, params={'batch': 1, 'inline_testcases': 1}, timeout=15, allow_redirects=True)
+    # 使用浏览器解决挑战
+    url = f"{host}/api/judge_fetch.php?batch=1&inline_testcases=1"
+    print(f"  [Attempt 1] Using browser to access {url}", file=sys.stderr)
+    
+    result = solve_challenge_with_browser(url, timeout=30)
+    
+    if result:
+        print(f"  [Success] Challenge solved with browser", file=sys.stderr)
+        # 设置 Cookies 到 session
+        for cookie in result.get('cookies', []):
+            session.cookies.set(
+                cookie['name'],
+                cookie['value'],
+                domain=cookie.get('domain'),
+                path=cookie.get('path')
+            )
+            print(f"    Set cookie: {cookie['name']}={cookie['value'][:10]}...", file=sys.stderr)
+        
+        # 现在尝试获取实际数据
+        print(f"  [Attempt 2] Fetching data with session cookies", file=sys.stderr)
+        resp = session.get(result['url'], timeout=15)
+        
         ct = resp.headers.get('content-type', '')
-        html_check = resp.text.strip().startswith('<html')
-        print(f"    Content-Type: {ct}, starts with HTML: {html_check}", file=sys.stderr)
-        print(f"    Response length: {len(resp.text)}, status_code: {resp.status_code}", file=sys.stderr)
+        print(f"    Content-Type: {ct}, Length: {len(resp.text)}", file=sys.stderr)
         
-        # 只检查 Content-Type，不检查是否以 <html 开头
-        if 'text/html' not in ct:
-            print(f"  [Attempt {attempt+1}] Success! Got JSON response", file=sys.stderr)
-            print(f"    Response preview: {resp.text[:100]}", file=sys.stderr)
-            return session, resp  # Already got real data
- 
-        print(f"  [Attempt {attempt+1}] Got HTML response, attempting to solve challenge", file=sys.stderr)
-        cookie = solve_challenge(resp.text)
-        if not cookie:
-            print(f"  Challenge attempt {attempt+1}: failed to solve", file=sys.stderr)
-            continue
+        if 'text/html' not in ct or resp.status_code == 200:
+            try:
+                data = resp.json()
+                if data.get('success'):
+                    print(f"  [Success] Got valid JSON response", file=sys.stderr)
+                    return session, resp
+            except:
+                pass
         
-        print(f"  [Attempt {attempt+1}] Got cookie: {cookie[:8]}...", file=sys.stderr)
-        session.cookies.set('__test', cookie, domain=domain, path='/')
-        session.headers['Cookie'] = f'__test={cookie}'
-        print(f"    Set Cookie in session", file=sys.stderr)
- 
-        redirect = re.search(r'location\.href="([^"]+)"', resp.text)
-        if redirect:
-            redirect_url = redirect.group(1).replace('***', host)
-            if redirect_url.startswith('/'):
-                redirect_url = host + redirect_url
-            url = redirect_url
-            print(f"  [Attempt {attempt+1}] Redirect URL: {url}", file=sys.stderr)
- 
-        print(f"  Challenge attempt {attempt+1}: solved, retrying...", file=sys.stderr)
-        time.sleep(0.5)  # 给服务器时间处理 Cookie
- 
+        print(f"  [Fallback] Trying original URL without session", file=sys.stderr)
+        # 如果失败，尝试用浏览器再次获取
+        result2 = solve_challenge_with_browser(url, timeout=30)
+        if result2:
+            for cookie in result2.get('cookies', []):
+                session.cookies.set(
+                    cookie['name'],
+                    cookie['value'],
+                    domain=cookie.get('domain'),
+                    path=cookie.get('path')
+                )
+            resp = session.get(result2['url'], timeout=15)
+            return session, resp
+    
     return session, None
  
  
@@ -133,13 +150,6 @@ def download_testcase(url, session, cache_dir):
     for _ in range(2):
         try:
             resp = session.get(url, timeout=10, allow_redirects=True)
-            if 'text/html' in resp.headers.get('content-type', ''):
-                cookie = solve_challenge(resp.text)
-                if cookie:
-                    domain = urlparse(url).hostname or ''
-                    session.cookies.set('__test', cookie, domain=domain)
-                    session.headers['Cookie'] = f'__test={cookie}'
-                    continue
             if resp.status_code == 200:
                 os.makedirs(cache_dir, exist_ok=True)
                 with open(cache_path, 'wb') as f:
@@ -310,13 +320,6 @@ def report_results(session, site_url, results):
  
     try:
         resp = session.post(url, json=payload, timeout=10)
-        if 'text/html' in resp.headers.get('content-type', ''):
-            cookie = solve_challenge(resp.text)
-            if cookie:
-                domain = urlparse(site_url).hostname or ''
-                session.cookies.set('__test', cookie, domain=domain)
-                session.headers['Cookie'] = f'__test={cookie}'
-                resp = session.post(url, json=payload, timeout=10)
         return resp.status_code == 200
     except Exception:
         return False
@@ -335,7 +338,7 @@ def main():
  
     t0 = time.time()
  
-    # Step 1: Create session + fetch (challenge solved once here)
+    # Step 1: Create session + fetch (using browser to solve challenge)
     session, response = create_session(host, args.api_key)
     if response is None:
         print("Failed: challenge not solved", file=sys.stderr)
@@ -366,7 +369,7 @@ def main():
             f.write('# HhOJ Judge Result\n\n**Status**: No pending submissions\n')
         return
  
-    # Step 2: Judge (reusing same session - no redundant challenge!)
+    # Step 2: Judge (reusing same session)
     t1 = time.time()
     results = []
     for sub in submissions:
