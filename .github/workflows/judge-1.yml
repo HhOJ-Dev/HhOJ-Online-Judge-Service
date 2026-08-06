@@ -45,6 +45,8 @@ jobs:
           pip install -q -r blankend/requirements.txt
           echo "Pip: $((($(date +%s%N) - START)/1000000))ms"
           # gcc/g++ already preinstalled on ubuntu-latest; Java/C#/Pascal installed on-demand by judge_all.sh
+          playwright install
+          echo "Playwright browsers installed"
           HOST="${HHOJ_HOST%/}"
           bash blankend/judge_all.sh "$HOST"
           echo "Total: $((($(date +%s%N) - START)/1000000))ms"
