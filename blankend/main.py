@@ -52,6 +52,7 @@ def solve_challenge(html_text):
     if not numbers or len(numbers) < 3:
         # 添加调试信息：找到了多少个匹配？
         print(f"  [Challenge] No valid numbers found. Found {len(numbers or [])} matches", file=sys.stderr)
+        print(f"  [Challenge] Response preview: {html_text[:200]}", file=sys.stderr)
         return None
     
     a, b, c = bytes.fromhex(numbers[0]), bytes.fromhex(numbers[1]), bytes.fromhex(numbers[2])
@@ -87,14 +88,20 @@ def create_session(host, api_key):
     url = f"{host}/api/judge_fetch.php"
     for attempt in range(8):
         print(f"  [Attempt {attempt+1}] GET {url}", file=sys.stderr)
+        print(f"    Cookies: {dict(session.cookies)}", file=sys.stderr)
         resp = session.get(url, params={'batch': 1, 'inline_testcases': 1}, timeout=15, allow_redirects=True)
         ct = resp.headers.get('content-type', '')
-        print(f"    Content-Type: {ct}, starts with HTML: {resp.text.strip().startswith('<html')}", file=sys.stderr)
+        html_check = resp.text.strip().startswith('<html')
+        print(f"    Content-Type: {ct}, starts with HTML: {html_check}", file=sys.stderr)
+        print(f"    Response length: {len(resp.text)}, status_code: {resp.status_code}", file=sys.stderr)
         
-        if 'text/html' not in ct and not resp.text.strip().startswith('<html'):
+        # 只检查 Content-Type，不检查是否以 <html 开头
+        if 'text/html' not in ct:
             print(f"  [Attempt {attempt+1}] Success! Got JSON response", file=sys.stderr)
+            print(f"    Response preview: {resp.text[:100]}", file=sys.stderr)
             return session, resp  # Already got real data
  
+        print(f"  [Attempt {attempt+1}] Got HTML response, attempting to solve challenge", file=sys.stderr)
         cookie = solve_challenge(resp.text)
         if not cookie:
             print(f"  Challenge attempt {attempt+1}: failed to solve", file=sys.stderr)
@@ -103,6 +110,7 @@ def create_session(host, api_key):
         print(f"  [Attempt {attempt+1}] Got cookie: {cookie[:8]}...", file=sys.stderr)
         session.cookies.set('__test', cookie, domain=domain, path='/')
         session.headers['Cookie'] = f'__test={cookie}'
+        print(f"    Set Cookie in session", file=sys.stderr)
  
         redirect = re.search(r'location\.href="([^"]+)"', resp.text)
         if redirect:
@@ -125,7 +133,7 @@ def download_testcase(url, session, cache_dir):
     for _ in range(2):
         try:
             resp = session.get(url, timeout=10, allow_redirects=True)
-            if 'text/html' in resp.headers.get('content-type', '') or resp.text.strip().startswith('<html'):
+            if 'text/html' in resp.headers.get('content-type', ''):
                 cookie = solve_challenge(resp.text)
                 if cookie:
                     domain = urlparse(url).hostname or ''
@@ -302,7 +310,7 @@ def report_results(session, site_url, results):
  
     try:
         resp = session.post(url, json=payload, timeout=10)
-        if 'text/html' in resp.headers.get('content-type', '') or resp.text.startswith('<html'):
+        if 'text/html' in resp.headers.get('content-type', ''):
             cookie = solve_challenge(resp.text)
             if cookie:
                 domain = urlparse(site_url).hostname or ''
