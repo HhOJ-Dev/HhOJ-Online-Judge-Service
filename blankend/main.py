@@ -154,6 +154,10 @@ def create_session(host, api_key):
         text = resp.text
         is_html = 'text/html' in content_type or text.strip().startswith('<html') or text.strip().startswith('<!DOCTYPE')
 
+        if attempt == 0:
+            print(f"  [AES] Response headers: {dict(resp.headers)}", file=sys.stderr)
+            print(f"  [AES] Session cookies after response: {dict(session.cookies)}", file=sys.stderr)
+
         if not is_html:
             print(f"  [AES] Attempt {attempt+1}: got non-HTML response ({len(text)} bytes)", file=sys.stderr)
             try:
