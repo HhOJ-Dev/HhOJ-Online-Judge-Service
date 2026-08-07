@@ -139,13 +139,15 @@ def create_session(host, api_key):
         'X-Requested-With': 'XMLHttpRequest',
     })
     domain = urlparse(host).hostname or host
-    url = f"{host}/api/judge_fetch.php?batch=1&inline_testcases=1"
+    # Pass API key via GET param too, in case InfinityFree strips X-API-Key header
+    url = f"{host}/api/judge_fetch.php?batch=1&inline_testcases=1&key={api_key}"
 
     # Primary: pure Python AES challenge solving in requests session
     print(f"  [AES] Solving challenge via requests session", file=sys.stderr)
+    fetch_url = url
     for attempt in range(5):
         try:
-            resp = session.get(url, timeout=15, allow_redirects=True)
+            resp = session.get(fetch_url, timeout=15, allow_redirects=True)
         except Exception as e:
             print(f"  [AES] Attempt {attempt+1}: request failed: {e}", file=sys.stderr)
             continue
@@ -154,12 +156,8 @@ def create_session(host, api_key):
         text = resp.text
         is_html = 'text/html' in content_type or text.strip().startswith('<html') or text.strip().startswith('<!DOCTYPE')
 
-        if attempt == 0:
-            print(f"  [AES] Response headers: {dict(resp.headers)}", file=sys.stderr)
-            print(f"  [AES] Session cookies after response: {dict(session.cookies)}", file=sys.stderr)
-
         if not is_html:
-            print(f"  [AES] Attempt {attempt+1}: got non-HTML response ({len(text)} bytes)", file=sys.stderr)
+            print(f"  [AES] Attempt {attempt+1}: got non-HTML response ({len(text)} bytes, status={resp.status_code})", file=sys.stderr)
             try:
                 data = json.loads(text)
                 if data.get('success'):
@@ -175,14 +173,13 @@ def create_session(host, api_key):
         # Challenge page — solve it
         cookie_value = solve_challenge_with_aes(text)
         if not cookie_value:
-            print(f"  [AES] Attempt {attempt+1}: HTML but no challenge pattern (status={resp.status_code}, ct={content_type}, len={len(text)}, first200={text[:200]})", file=sys.stderr)
+            print(f"  [AES] Attempt {attempt+1}: HTML but no challenge (status={resp.status_code}, len={len(text)})", file=sys.stderr)
             continue
 
         print(f"  [AES] Attempt {attempt+1}: solved, __test={cookie_value[:10]}...", file=sys.stderr)
         session.cookies.set('__test', cookie_value, domain=domain, path='/')
-        print(f"  [AES] Session cookies: {dict(session.cookies)}", file=sys.stderr)
 
-        # Try following the redirect URL (with &i=1) as the browser does
+        # Follow redirect URL embedded in challenge HTML (browser behavior)
         redirect_match = re.search(r'location\.href="([^"]+)"', text)
         if redirect_match:
             redirect_url = redirect_match.group(1)
@@ -190,34 +187,15 @@ def create_session(host, api_key):
                 redirect_url = redirect_url.replace('***', host)
             if redirect_url.startswith('/'):
                 redirect_url = host + redirect_url
-            # Use redirect URL for next request
-            try:
-                resp2 = session.get(redirect_url, timeout=15, allow_redirects=True)
-                print(f"  [AES] Redirect request: status={resp2.status_code}, ct={resp2.headers.get('content-type','')}, len={len(resp2.text)}", file=sys.stderr)
-                if resp2.status_code == 200:
-                    try:
-                        data = json.loads(resp2.text)
-                        if data.get('success') is not None:
-                            print(f"  [Success] Got JSON via redirect URL", file=sys.stderr)
-                            return session, resp2
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"  [AES] Redirect request failed: {e}", file=sys.stderr)
-
-        # Also try a simple page to check if server works at all
-        if attempt == 0:
-            try:
-                diag = session.get(f"{host}/", timeout=10, allow_redirects=True)
-                print(f"  [AES] Homepage diagnostic: status={diag.status_code}, ct={diag.headers.get('content-type','')}, len={len(diag.text)}, first200={diag.text[:200]}", file=sys.stderr)
-            except Exception as e:
-                print(f"  [AES] Homepage diagnostic failed: {e}", file=sys.stderr)
+            fetch_url = redirect_url
+        # Reset to original URL for subsequent attempts after redirect
+        else:
+            fetch_url = url
 
     # Fallback: browser approach (with API key header so browser can fetch data)
     print(f"  [Browser] AES approach failed, trying browser fallback", file=sys.stderr)
     result = solve_challenge_with_browser(url, timeout=30, api_key=api_key)
     if result:
-        # Set cookies on session for later use (download_testcase, report_results)
         for cookie in result.get('cookies', []):
             session.cookies.set(
                 cookie['name'], cookie['value'],
