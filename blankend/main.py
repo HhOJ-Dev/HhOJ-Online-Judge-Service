@@ -143,10 +143,9 @@ def create_session(host, api_key):
 
     # Primary: pure Python AES challenge solving in requests session
     print(f"  [AES] Solving challenge via requests session", file=sys.stderr)
-    fetch_url = url
     for attempt in range(5):
         try:
-            resp = session.get(fetch_url, timeout=15, allow_redirects=True)
+            resp = session.get(url, timeout=15, allow_redirects=True)
         except Exception as e:
             print(f"  [AES] Attempt {attempt+1}: request failed: {e}", file=sys.stderr)
             continue
@@ -172,21 +171,13 @@ def create_session(host, api_key):
         # Challenge page — solve it
         cookie_value = solve_challenge_with_aes(text)
         if not cookie_value:
-            print(f"  [AES] Attempt {attempt+1}: failed to solve challenge", file=sys.stderr)
+            print(f"  [AES] Attempt {attempt+1}: HTML but no challenge pattern (status={resp.status_code}, ct={content_type}, len={len(text)}, first200={text[:200]})", file=sys.stderr)
             continue
 
         print(f"  [AES] Attempt {attempt+1}: solved, __test={cookie_value[:10]}...", file=sys.stderr)
         session.cookies.set('__test', cookie_value, domain=domain, path='/')
-
-        # Follow redirect URL embedded in challenge HTML
-        redirect_match = re.search(r'location\.href="([^"]+)"', text)
-        if redirect_match:
-            redirect_url = redirect_match.group(1)
-            if '***' in redirect_url:
-                redirect_url = redirect_url.replace('***', host)
-            if redirect_url.startswith('/'):
-                redirect_url = host + redirect_url
-            fetch_url = redirect_url
+        # Also set via header to bypass cookie jar domain matching issues
+        session.headers['Cookie'] = f'__test={cookie_value}'
 
     # Fallback: browser approach (with API key header so browser can fetch data)
     print(f"  [Browser] AES approach failed, trying browser fallback", file=sys.stderr)
