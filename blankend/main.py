@@ -132,34 +132,28 @@ def create_session(host, api_key):
             )
             print(f"    Set cookie: {cookie['name']}={cookie['value'][:10]}...", file=sys.stderr)
         
-        # 使用浏览器返回的内容，而不是重新请求
-        print(f"  [Attempt 2] Using browser content directly", file=sys.stderr)
-        
-        ct = 'application/json'
-        content = result.get('content', '')
-        print(f"    Content length: {len(content)}", file=sys.stderr)
-        
-        # [DEBUG] 输出网页内容
-        if len(content) < 10000:
-            print(f"  [DEBUG] Response content:\n{content}", file=sys.stderr)
-        else:
-            print(f"  [DEBUG] Response content (first 1000 chars):\n{content[:1000]}", file=sys.stderr)
-        
+        # 用 session（已带 cookie + API key）重新请求 API
+        print(f"  [Attempt 2] Fetching API data with session cookies", file=sys.stderr)
         try:
-            data = json.loads(content)
-            if data.get('success'):
-                print(f"  [Success] Got valid JSON response", file=sys.stderr)
-                # 创建 Response 对象供后续使用
-                resp = requests.Response()
-                resp._content = content.encode('utf-8')
-                resp.headers['content-type'] = 'application/json'
-                return session, resp
+            resp = session.get(url, timeout=15, allow_redirects=True)
+            content = resp.text
+            print(f"    Content length: {len(content)}", file=sys.stderr)
+            if len(content) < 10000:
+                print(f"  [DEBUG] Response content:\n{content}", file=sys.stderr)
+            else:
+                print(f"  [DEBUG] Response content (first 1000 chars):\n{content[:1000]}", file=sys.stderr)
+
+            try:
+                data = json.loads(content)
+                if data.get('success'):
+                    print(f"  [Success] Got valid JSON response", file=sys.stderr)
+                    return session, resp
+            except Exception as e:
+                print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
-            pass
-        
+            print(f"  [Request error]: {e}", file=sys.stderr)
+
         print(f"  [Fallback] Trying again with fresh browser session", file=sys.stderr)
-        # 如果失败，尝试用浏览器再次获取
         result2 = solve_challenge_with_browser(url, timeout=30)
         if result2:
             for cookie in result2.get('cookies', []):
@@ -169,13 +163,12 @@ def create_session(host, api_key):
                     domain=cookie.get('domain'),
                     path=cookie.get('path')
                 )
-            content2 = result2.get('content', '')
-            # [DEBUG] 输出第二次尝试的网页内容
-            print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{content2[:1000]}", file=sys.stderr)
-            resp = requests.Response()
-            resp._content = content2.encode('utf-8')
-            resp.headers['content-type'] = 'application/json'
-            return session, resp
+            try:
+                resp = session.get(url, timeout=15, allow_redirects=True)
+                print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
+                return session, resp
+            except Exception as e:
+                print(f"  [Fallback request error]: {e}", file=sys.stderr)
     
     return session, None
  

@@ -42,6 +42,8 @@ jobs:
           START=$(date +%s%N)
           pip install -q -r blankend/requirements.txt
           echo "Pip: $((($(date +%s%N) - START)/1000000))ms"
+          playwright install
+          echo "Playwright browsers installed"
           HOST="${HHOJ_HOST%/}"
           bash blankend/judge_all.sh "$HOST"
           echo "Total: $((($(date +%s%N) - START)/1000000))ms"
