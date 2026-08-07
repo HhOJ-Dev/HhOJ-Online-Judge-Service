@@ -35,63 +35,87 @@ STATUS_TO_HHOJ = {
 }
  
  
-def solve_challenge_with_browser(url, timeout=30):
+def solve_challenge_with_aes(html_text):
+    """Solve InfinityFree's JavaScript AES challenge using pure Python."""
+    numbers = re.findall(r'toNumbers\("([a-f0-9]{32})"\)', html_text)
+    if len(numbers) < 3:
+        return None
+    a = bytes.fromhex(numbers[0])
+    b = bytes.fromhex(numbers[1])
+    c = bytes.fromhex(numbers[2])
+
+    # InfinityFree uses slowAES.decrypt(c, 2, a, b) where 2 = CBC mode
+    try:
+        cipher = AES.new(a, AES.MODE_CBC, iv=b)
+        return cipher.decrypt(c).hex()
+    except Exception:
+        pass
+
+    # Fallback: try other modes
+    for mode in [AES.MODE_ECB, AES.MODE_OFB, AES.MODE_CFB]:
+        try:
+            if mode == AES.MODE_ECB:
+                cipher = AES.new(a, mode)
+            else:
+                cipher = AES.new(a, mode, iv=b)
+            val = cipher.decrypt(c).hex()
+            if val:
+                return val
+        except Exception:
+            continue
+    return None
+
+
+def solve_challenge_with_browser(url, timeout=30, api_key=None):
     """使用 Playwright 自动解决挑战，处理多轮重定向"""
     print(f"  [Browser] Starting Playwright to solve challenge at {url}", file=sys.stderr)
-    
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print(f"  [Browser] Playwright not installed, falling back to request-only mode", file=sys.stderr)
         return None
-    
+
     try:
         with sync_playwright() as p:
-            # 使用无头浏览器（headless）
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-            context = browser.new_context()
+            extra_headers = {}
+            if api_key:
+                extra_headers['X-API-Key'] = api_key
+            context = browser.new_context(extra_http_headers=extra_headers if extra_headers else None)
             page = context.new_page()
-            
+
             print(f"  [Browser] Navigating to {url}", file=sys.stderr)
             page.goto(url, wait_until='networkidle', timeout=timeout * 1000)
-            
-            # 等待挑战完成（页面自动跳转或加载完成）
+
             print(f"  [Browser] Waiting for challenge to complete...", file=sys.stderr)
-            time.sleep(2)  # 给 JavaScript 时间执行
-            
-            # 处理多轮重定向：检查页面是否仍然是 HTML 挑战页面，如果是则继续等待
+            time.sleep(2)
+
             max_redirect_attempts = 10
             for attempt in range(max_redirect_attempts):
                 content = page.content()
                 current_url = page.url
-                
+
                 print(f"  [Browser] Redirect attempt {attempt + 1}: {current_url}", file=sys.stderr)
-                
-                # 检查是否仍然是 JavaScript 挑战页面
-                # 如果页面包含 slowAES.decrypt 或 location.href，说明仍在挑战
+
                 if 'slowAES.decrypt' in content or 'location.href' in content:
                     print(f"  [Browser] Still on challenge page, waiting for redirect...", file=sys.stderr)
-                    time.sleep(2)  # 等待 JavaScript 执行和重定向
+                    time.sleep(2)
                     page.wait_for_load_state('networkidle', timeout=timeout * 1000)
                     continue
                 else:
-                    # 页面已经不是挑战页面
                     print(f"  [Browser] Challenge completed after {attempt + 1} attempt(s)", file=sys.stderr)
                     break
-            
-            # 获取 Cookies
+
             cookies = context.cookies()
             print(f"  [Browser] Got {len(cookies)} cookies", file=sys.stderr)
-            
-            # 获取当前 URL（可能已重定向）
+
             final_url = page.url
             print(f"  [Browser] Final URL: {final_url}", file=sys.stderr)
-            
-            # 获取响应内容（直接从浏览器，已经过过挑战）
+
             content = page.content()
-            
             browser.close()
-            
+
             return {
                 'cookies': cookies,
                 'url': final_url,
@@ -102,74 +126,91 @@ def solve_challenge_with_browser(url, timeout=30):
         import traceback
         traceback.print_exc(file=sys.stderr)
         return None
- 
- 
+
+
 def create_session(host, api_key):
-    """Create session and solve challenge using browser."""
+    """Create session and solve InfinityFree challenge."""
     session = requests.Session()
     session.headers.update({
         'X-API-Key': api_key,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'X-Requested-With': 'XMLHttpRequest',
     })
     domain = urlparse(host).hostname or host
- 
-    # 使用浏览器解决挑战
     url = f"{host}/api/judge_fetch.php?batch=1&inline_testcases=1"
-    print(f"  [Attempt 1] Using browser to access {url}", file=sys.stderr)
-    
-    result = solve_challenge_with_browser(url, timeout=30)
-    
-    if result:
-        print(f"  [Success] Challenge solved with browser", file=sys.stderr)
-        # 设置 Cookies 到 session
-        for cookie in result.get('cookies', []):
-            session.cookies.set(
-                cookie['name'],
-                cookie['value'],
-                domain=cookie.get('domain'),
-                path=cookie.get('path')
-            )
-            print(f"    Set cookie: {cookie['name']}={cookie['value'][:10]}...", file=sys.stderr)
-        
-        # 用 session（已带 cookie + API key）重新请求 API
-        print(f"  [Attempt 2] Fetching API data with session cookies", file=sys.stderr)
-        try:
-            resp = session.get(url, timeout=15, allow_redirects=True)
-            content = resp.text
-            print(f"    Content length: {len(content)}", file=sys.stderr)
-            if len(content) < 10000:
-                print(f"  [DEBUG] Response content:\n{content}", file=sys.stderr)
-            else:
-                print(f"  [DEBUG] Response content (first 1000 chars):\n{content[:1000]}", file=sys.stderr)
 
+    # Primary: pure Python AES challenge solving in requests session
+    print(f"  [AES] Solving challenge via requests session", file=sys.stderr)
+    fetch_url = url
+    for attempt in range(5):
+        try:
+            resp = session.get(fetch_url, timeout=15, allow_redirects=True)
+        except Exception as e:
+            print(f"  [AES] Attempt {attempt+1}: request failed: {e}", file=sys.stderr)
+            continue
+
+        content_type = resp.headers.get('content-type', '')
+        text = resp.text
+        is_html = 'text/html' in content_type or text.strip().startswith('<html') or text.strip().startswith('<!DOCTYPE')
+
+        if not is_html:
+            print(f"  [AES] Attempt {attempt+1}: got non-HTML response ({len(text)} bytes)", file=sys.stderr)
             try:
-                data = json.loads(content)
+                data = json.loads(text)
                 if data.get('success'):
                     print(f"  [Success] Got valid JSON response", file=sys.stderr)
                     return session, resp
+                else:
+                    print(f"  [AES] API error: {data.get('message', 'Unknown')}", file=sys.stderr)
+                    return session, resp
             except Exception as e:
-                print(f"  [DEBUG] JSON parse error: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"  [Request error]: {e}", file=sys.stderr)
-
-        print(f"  [Fallback] Trying again with fresh browser session", file=sys.stderr)
-        result2 = solve_challenge_with_browser(url, timeout=30)
-        if result2:
-            for cookie in result2.get('cookies', []):
-                session.cookies.set(
-                    cookie['name'],
-                    cookie['value'],
-                    domain=cookie.get('domain'),
-                    path=cookie.get('path')
-                )
-            try:
-                resp = session.get(url, timeout=15, allow_redirects=True)
-                print(f"  [DEBUG] Second attempt response (first 1000 chars):\n{resp.text[:1000]}", file=sys.stderr)
+                print(f"  [AES] JSON parse error: {e}", file=sys.stderr)
                 return session, resp
-            except Exception as e:
-                print(f"  [Fallback request error]: {e}", file=sys.stderr)
-    
+
+        # Challenge page — solve it
+        cookie_value = solve_challenge_with_aes(text)
+        if not cookie_value:
+            print(f"  [AES] Attempt {attempt+1}: failed to solve challenge", file=sys.stderr)
+            continue
+
+        print(f"  [AES] Attempt {attempt+1}: solved, __test={cookie_value[:10]}...", file=sys.stderr)
+        session.cookies.set('__test', cookie_value, domain=domain, path='/')
+
+        # Follow redirect URL embedded in challenge HTML
+        redirect_match = re.search(r'location\.href="([^"]+)"', text)
+        if redirect_match:
+            redirect_url = redirect_match.group(1)
+            if '***' in redirect_url:
+                redirect_url = redirect_url.replace('***', host)
+            if redirect_url.startswith('/'):
+                redirect_url = host + redirect_url
+            fetch_url = redirect_url
+
+    # Fallback: browser approach (with API key header so browser can fetch data)
+    print(f"  [Browser] AES approach failed, trying browser fallback", file=sys.stderr)
+    result = solve_challenge_with_browser(url, timeout=30, api_key=api_key)
+    if result:
+        # Set cookies on session for later use (download_testcase, report_results)
+        for cookie in result.get('cookies', []):
+            session.cookies.set(
+                cookie['name'], cookie['value'],
+                domain=cookie.get('domain'), path=cookie.get('path')
+            )
+        content = result.get('content', '')
+        print(f"  [Browser] Content length: {len(content)}", file=sys.stderr)
+        try:
+            data = json.loads(content)
+            if data.get('success'):
+                print(f"  [Success] Got valid JSON response via browser", file=sys.stderr)
+                resp = requests.Response()
+                resp._content = content.encode('utf-8')
+                resp.headers['content-type'] = 'application/json'
+                return session, resp
+        except Exception as e:
+            print(f"  [Browser] JSON parse error: {e}", file=sys.stderr)
+
     return session, None
  
  
