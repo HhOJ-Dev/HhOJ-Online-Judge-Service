@@ -176,8 +176,7 @@ def create_session(host, api_key):
 
         print(f"  [AES] Attempt {attempt+1}: solved, __test={cookie_value[:10]}...", file=sys.stderr)
         session.cookies.set('__test', cookie_value, domain=domain, path='/')
-        # Also set via header to bypass cookie jar domain matching issues
-        session.headers['Cookie'] = f'__test={cookie_value}'
+        print(f"  [AES] Session cookies: {dict(session.cookies)}", file=sys.stderr)
 
     # Fallback: browser approach (with API key header so browser can fetch data)
     print(f"  [Browser] AES approach failed, trying browser fallback", file=sys.stderr)
