@@ -182,6 +182,37 @@ def create_session(host, api_key):
         session.cookies.set('__test', cookie_value, domain=domain, path='/')
         print(f"  [AES] Session cookies: {dict(session.cookies)}", file=sys.stderr)
 
+        # Try following the redirect URL (with &i=1) as the browser does
+        redirect_match = re.search(r'location\.href="([^"]+)"', text)
+        if redirect_match:
+            redirect_url = redirect_match.group(1)
+            if '***' in redirect_url:
+                redirect_url = redirect_url.replace('***', host)
+            if redirect_url.startswith('/'):
+                redirect_url = host + redirect_url
+            # Use redirect URL for next request
+            try:
+                resp2 = session.get(redirect_url, timeout=15, allow_redirects=True)
+                print(f"  [AES] Redirect request: status={resp2.status_code}, ct={resp2.headers.get('content-type','')}, len={len(resp2.text)}", file=sys.stderr)
+                if resp2.status_code == 200:
+                    try:
+                        data = json.loads(resp2.text)
+                        if data.get('success') is not None:
+                            print(f"  [Success] Got JSON via redirect URL", file=sys.stderr)
+                            return session, resp2
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"  [AES] Redirect request failed: {e}", file=sys.stderr)
+
+        # Also try a simple page to check if server works at all
+        if attempt == 0:
+            try:
+                diag = session.get(f"{host}/", timeout=10, allow_redirects=True)
+                print(f"  [AES] Homepage diagnostic: status={diag.status_code}, ct={diag.headers.get('content-type','')}, len={len(diag.text)}, first200={diag.text[:200]}", file=sys.stderr)
+            except Exception as e:
+                print(f"  [AES] Homepage diagnostic failed: {e}", file=sys.stderr)
+
     # Fallback: browser approach (with API key header so browser can fetch data)
     print(f"  [Browser] AES approach failed, trying browser fallback", file=sys.stderr)
     result = solve_challenge_with_browser(url, timeout=30, api_key=api_key)
